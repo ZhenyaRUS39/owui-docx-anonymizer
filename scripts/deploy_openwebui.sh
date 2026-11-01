@@ -21,6 +21,9 @@
 #   OWUI_URL=http://127.0.0.1:8080  адрес Open WebUI внутри хоста
 #   FILTER_ID=docx_anonymizer    id функции-фильтра
 #   SKIP_LIVE_CHECK=1            не гонять живую проверку в конце
+#   LIVE_SRC=<каталог>           каталог со скриптами живой проверки. Если они есть
+#                                (в скилле агента) — скрипт запустит проверку после
+#                                установки; если нет — проверка пропускается.
 set -euo pipefail
 
 HA_HOST="${HA_HOST:-192.168.1.4}"
@@ -210,7 +213,27 @@ owui_api_get "/api/v1/functions/id/$FILTER_ID" | python3 -c 'import json,sys; d=
 say "ГОТОВО"
 echo "Проверка: curl http://127.0.0.1:$PORT/health"
 echo "Фильтр: $FILTER_ID (active + global)"
-echo
-echo "Проверить, что обезличивание работает, можно загрузить документ в чат:"
-echo "  — модель должна видеть метки ([ФИО_1], [ПАСПОРТ_1]), а не исходные значения;"
-echo "  — в ответе пользователю значения должны быть восстановлены."
+
+# Живая проверка (6 сквозных сценариев) — скрипты лежат не здесь, а рядом
+# с этим репозиторием (в скилле агента). Если их нет — пропускаем.
+LIVE_SRC="${LIVE_SRC:-}"
+if [ -z "$LIVE_SRC" ] && [ -f "$SKILL_DIR/scripts/test_live_deployed.py" ]; then
+  LIVE_SRC="$SKILL_DIR"
+fi
+if [ -n "$LIVE_SRC" ] && [ -f "$LIVE_SRC/scripts/test_live_deployed.py" ]; then
+  say "живая проверка фильтра"
+  cat "$LIVE_SRC/scripts/test_live_deployed.py" | ssh_ha "cat > /tmp/test_live_deployed.py"
+  cat "$LIVE_SRC/scripts/live_fixtures.py" | ssh_ha "cat > /tmp/live_fixtures.py"
+  cat "$LIVE_SRC/scripts/fixtures/live_check.pdf" | ssh_ha "cat > /tmp/live_check.pdf"
+  ssh_ha "docker cp /tmp/test_live_deployed.py $OWUI_CONTAINER:/tmp/test_live_deployed.py
+docker cp /tmp/live_fixtures.py $OWUI_CONTAINER:/tmp/live_fixtures.py
+docker exec $OWUI_CONTAINER mkdir -p /tmp/fixtures
+docker cp /tmp/live_check.pdf $OWUI_CONTAINER:/tmp/fixtures/live_check.pdf
+docker exec $OWUI_CONTAINER sh -c 'printf %s \"$API_KEY\" > /tmp/owui_key && chmod 600 /tmp/owui_key'
+docker exec $OWUI_CONTAINER timeout 300 python3 /tmp/test_live_deployed.py" || true
+else
+  echo
+  echo "Проверить, что обезличивание работает, можно загрузить документ в чат:"
+  echo "  — модель должна видеть метки ([ФИО_1], [ПАСПОРТ_1]), а не исходные значения;"
+  echo "  — в ответе пользователю значения должны быть восстановлены."
+fi
