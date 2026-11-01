@@ -1,0 +1,456 @@
+"""
+Open WebUI Filter (v0.12.0): обезличивание вложений ДО того, как их увидит модель.
+
+Контракт проверен по исходникам open-webui v0.12.0 (snapshot /config/owui_research/v0120)
+и по SPEC /config/owui_research/SPEC.md:
+
+  * Тип функции определяется по имени класса: Pipe | Filter | Action | Event
+    (backend/open_webui/utils/plugin.py:296-306).
+  * Хуки Filter: inlet / request / outlet.
+    inlet  — backend/open_webui/utils/middleware.py:2691 (process_filter_functions(..., 'inlet'))
+    outlet — backend/open_webui/utils/middleware.py:4199
+  * ИМЯ ПАРАМЕТРА ПОЛЬЗОВАТЕЛЯ — `__user__`, не `user` (в штатном boilerplate это ошибка).
+  * Хуки могут быть async: utils/filter.py:159-162 (run_filter_handler) сам проверяет
+    inspect.iscoroutinefunction и ждёт coroutine. Методы Files.* — async, поэтому
+    inlet/outout здесь async.
+  * В inlet у сообщения пользователя ключ "files" УЖЕ УДАЛЁН (middleware.py:2371);
+    список вложений лежит в body["files"] (верхний уровень) — он ещё доступен,
+    его выпиливают только на middleware.py:2790, ПОСЛЕ inlet.
+    body["metadata"]["files"] заполняется на middleware.py:3011 — тоже после inlet.
+  * file_handler: если у фильтра есть self.file_handler = True, backend вычищает
+    список файлов после inlet (utils/filter.py:243-248) — оригинал не доедет ни до
+    RAG, ни до LLM.
+  * Содержимое файла: Files.get_file_by_id(id).data["content"] (уже извлечённый текст)
+    либо сырые байты через Storage.get_file(file.path).
+  * Восстановление ответа: outlet получает другой body, без metadata — карту ведём
+    по (chat_id, session_id) в WORKDIR.
+
+КАК РАБОТАЕТ ОБЕЗЛИЧИВАНИЕ:
+  Фильтр НЕ запускает node сам (в контейнере open-webui node нет вообще).
+  Он ходит по HTTP в локальный сервис обезличивания (SPEC §5 — «call your own
+  local HTTP service … needs no Open WebUI credentials at all»):
+      POST http://127.0.0.1:8971/anonymize  multipart: file=<байты>
+      POST http://127.0.0.1:8971/restore    json: {"text": ..., "map": ...}
+
+УСТАНОВКА:
+  POST /api/v1/functions/create   (id="docx_anonymizer", admin)
+  POST /api/v1/functions/id/docx_anonymizer/toggle
+  POST /api/v1/functions/id/docx_anonymizer/toggle/global
+"""
+
+import json
+import os
+import re
+import time
+
+import requests
+
+# Valves ОБЯЗАН быть pydantic-моделью: backend вызывает Valves.schema()
+# (routers/functions.py:510) и пересоздаёт self.valves перед каждым вызовом
+# (utils/plugin.py:64-70). Обычный класс без .schema() ломает всю функцию:
+# AttributeError проглатывается, и inlet не отрабатывает вовсе.
+from pydantic import BaseModel
+
+# Блок <attached_files> добавляет backend ДО inlet (middleware.py:2369 →
+# add_file_context). В нём id файла, по которому модель может вызвать
+# view_file и прочитать оригинал. Убираем блок целиком.
+_ATTACHED_FILES_RE = re.compile(
+    r"<attached_files>.*?</attached_files>\s*", re.DOTALL | re.IGNORECASE
+)
+
+
+def _strip_attached_files(text: str) -> str:
+    if not isinstance(text, str):
+        return text
+    return _ATTACHED_FILES_RE.sub("", text)
+
+
+def _strip_attached_files_in_list(items):
+    """content в формате list: [{'type':'text','text':...}, ...]."""
+    out = []
+    for it in items or []:
+        if isinstance(it, dict) and isinstance(it.get("text"), str):
+            it = dict(it)
+            it["text"] = _strip_attached_files(it["text"])
+        out.append(it)
+    return out
+
+
+class Filter:
+    class Valves(BaseModel):
+        # Адрес локального сервиса обезличивания (контейнер docx-anon-service,
+        # host-network — 127.0.0.1:8971 доступен и из контейнера open-webui).
+        SERVICE_URL: str = "http://127.0.0.1:8971"
+        # Таймаут запроса в секундах (PDF на 50 страниц ~ 10-20 с).
+        TIMEOUT: int = 300
+        # Максимальный размер файла, МБ. Больше — не выпускаем (fail-closed).
+        MAX_FILE_MB: int = 50
+        # Что делать с документом, который не удалось обезличить:
+        #   True  — НЕ выпускать его к модели (fail-closed): оригинал удаляется
+        #            из тела запроса, пользователю показывается плашка.
+        #            ВНИМАНИЕ: бросать исключение НЕЛЬЗЯ — при наличии
+        #            session_id и chat_id Open WebUI проглатывает его и всё
+        #            равно отправляет запрос к модели (main.py:1700-1706),
+        #            то есть уже с оригиналом.
+        #   False — выпустить как есть (ОПАСНО: ПДн уедут к модели).
+        FAIL_CLOSED: bool = True
+        # Максимальный размер ответа модели, который пропускаем через восстановление.
+        MAX_RESTORE_CHARS: int = 200000
+        # Хранить карту замен на диске (WORKDIR). Там лежат исходные ПДн.
+        WORKDIR: str = "/tmp/docx-anon"
+
+    def __init__(self):
+        self.valves = self.Valves()
+        self.file_handler = True
+
+    # ------------------------------------------------------------------
+    # служебное
+    # ------------------------------------------------------------------
+    def _service(self, path: str) -> str:
+        return self.valves.SERVICE_URL.rstrip("/") + path
+
+    def _map_path(self, key: str) -> str:
+        safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in (key or "unknown"))
+        return os.path.join(self.valves.WORKDIR, f"{safe}.json")
+
+    def _load_map(self, key: str):
+        p = self._map_path(key)
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except Exception:
+            return None
+
+    def _save_map(self, key: str, data) -> None:
+        try:
+            os.makedirs(self.valves.WORKDIR, exist_ok=True)
+            tmp = self._map_path(key) + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False)
+            os.replace(tmp, self._map_path(key))
+            os.chmod(self._map_path(key), 0o600)
+        except Exception:
+            pass
+
+    def _session_key(self, body: dict) -> str:
+        # outlet получает другое тело, поэтому ключ карты строим на устойчивых полях.
+        meta = body.get("metadata") or {}
+        for k in ("chat_id", "session_id", "id"):
+            if body.get(k):
+                return str(body[k])
+            if isinstance(meta, dict) and meta.get(k):
+                return str(meta[k])
+        return "global"
+
+    # Классификация вложений — три класса:
+    #   MEDIA      — картинки/аудио/видео: пропускаем как есть (текстовых ПДн нет)
+    #   DOCUMENT   — форматы, которые ядро обезличивает: обезличиваем
+    #   UNSUPPORTED— документы других форматов (xlsx/pptx/doc/odt…): БЛОКИРУЕМ,
+    #                потому что обезличить их нечем, а ПДн внутри вполне могут быть.
+    DOC_EXTS = {".docx", ".docm", ".pdf", ".txt", ".md", ".text"}
+    MEDIA_EXTS = {
+        ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".tiff", ".tif",
+        ".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac",
+        ".mp4", ".webm", ".mov", ".avi", ".mkv",
+    }
+
+    @staticmethod
+    def _file_items(body: dict):
+        """Список вложений: сначала верхний уровень, потом metadata."""
+        items = body.get("files") or []
+        if items:
+            return items
+        meta = body.get("metadata") or {}
+        return (meta.get("files") or []) if isinstance(meta, dict) else []
+
+    @classmethod
+    def _classify(cls, filename: str, meta: dict) -> str:
+        """'media' | 'document' | 'unsupported'.
+
+        Решаем по расширению имени: content_type у Open WebUI часто бывает
+        application/octet-stream (MIME не всегда определяется).
+        """
+        name = (filename or "").lower()
+        ext = os.path.splitext(name)[1] if "." in name else ""
+        if ext in cls.DOC_EXTS:
+            return "document"
+        if ext in cls.MEDIA_EXTS:
+            return "media"
+        ctype = ((meta or {}).get("content_type") or "").lower()
+        if not ext and ctype:
+            if ctype.startswith(("image/", "audio/", "video/")):
+                return "media"
+            if ctype in {
+                "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                "application/msword",
+                "application/pdf",
+                "text/plain",
+                "text/markdown",
+            }:
+                return "document"
+        if not ext and not ctype:
+            # Ни расширения, ни MIME — считаем документом: безопаснее перестать.
+            return "document"
+        return "unsupported"
+
+    async def _scrub_file_record(self, file_id: str, anon_text: str):
+        """Затираем ПДн в записи файла.
+
+        Одной чистки body["files"] мало: оригинал остаётся в БД
+        (files.data['content'] — уже извлечённый текст с ПДн), а его id
+        живёт в блоке <attached_files>, который backend добавляет ДО inlet
+        (middleware.py:2369 → add_file_context). По этому id модель может
+        вызвать встроенный инструмент view_file (tools/builtin.py:2757) и
+        прочитать оригинал. Поэтому перезаписываем содержимое записи
+        обезличенным текстом — тогда ПДн не достать ни одним путём.
+        """
+        try:
+            from open_webui.models.files import Files
+            await Files.update_file_data_by_id(
+                file_id,
+                {"content": anon_text, "status": "completed", "error": None},
+            )
+        except Exception:
+            # Не смогли затереть — не выпускаем id файла в теле запроса,
+            # иначе view_file достанет оригинал. Лучше потерять вложение,
+            # чем отдать ПДн.
+            raise RuntimeError(f"не удалось обезличить запись файла {file_id}")
+
+    async def _read_bytes(self, file_id: str):
+        """Сырые байты файла через storage-провайдер."""
+        from open_webui.models.files import Files
+        from open_webui.storage.provider import Storage
+
+        file = await Files.get_file_by_id(file_id)
+        if not file:
+            return None, None
+        raw = b""
+        try:
+            if getattr(file, "path", None):
+                path = Storage.get_file(file.path)
+                with open(path, "rb") as f:
+                    raw = f.read()
+        except Exception:
+            raw = b""
+        if not raw:
+            # Запасной путь: уже извлечённый текст (docx/pdf/txt → txt).
+            content = (getattr(file, "data", None) or {}).get("content", "")
+            if content:
+                raw = content.encode("utf-8")
+        return raw, getattr(file, "filename", "") or ""
+
+    def _anonymize(self, raw: bytes, filename: str):
+        files = {"file": (filename or "document.bin", raw)}
+        r = requests.post(
+            self._service("/anonymize"),
+            files=files,
+            timeout=self.valves.TIMEOUT,
+        )
+        if r.status_code != 200:
+            raise RuntimeError(f"anonymize HTTP {r.status_code}: {r.text[:200]}")
+        return r.json()
+
+    def _restore(self, text: str, mapping: dict):
+        r = requests.post(
+            self._service("/restore"),
+            json={"text": text, "map": mapping},
+            timeout=self.valves.TIMEOUT,
+        )
+        if r.status_code != 200:
+            raise RuntimeError(f"restore HTTP {r.status_code}: {r.text[:200]}")
+        return r.json().get("text", text)
+
+    # ------------------------------------------------------------------
+    # хуки
+    # ------------------------------------------------------------------
+    async def inlet(self, body: dict, __user__=None, __request__=None) -> dict:
+        """Перехват до модели: обезличиваем вложения, оригиналы убираем.
+
+        ВАЖНО про fail-closed: исключение из inlet НЕ является блокировкой.
+        В Open WebUI v0.12.0 main.py:1700-1706 исключение при наличии
+        session_id и chat_id проглатывается — запрос всё равно уходит к модели,
+        только уже БЕЗ обезличивания (то есть с оригиналом). Поэтому при
+        сбое мы не бросаем исключение, а:
+          * удаляем оригинал из тела запроса (файл не доедет ни до RAG,
+            ни до view_file, ни до file_context),
+          * подставляем в сообщение явную плашку, что документ не обезличен
+            и потому не отправлен.
+        Так запрос физически не может унести ПДн.
+        """
+        items = self._file_items(body)
+        if not items:
+            return body
+
+        anon_blocks = []
+        blocked = []
+        key = self._session_key(body)
+        maps = {}
+        kept_files = []  # не-документы (картинки и пр.) оставляем как есть
+
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            file_id = item.get("id")
+            if not file_id:
+                continue
+            raw, filename = await self._read_bytes(file_id)
+            if not raw:
+                continue
+            meta = item.get("meta") or {}
+            kind = self._classify(filename, meta)
+            if kind == "media":
+                # Картинка/аудио/видео — не документ. Пропускаем как есть:
+                # обезличивать нечего, а блокировать обычный чат нельзя.
+                kept_files.append(item)
+                continue
+            if kind == "unsupported":
+                # Документ формата, который ядро не читает (xlsx/pptx/doc/odt).
+                # ПДн внутри возможны, обезличить нечем → по политике не выпускаем.
+                if self.valves.FAIL_CLOSED:
+                    blocked.append(f"{filename} (формат не поддерживается обезличиванием)")
+                else:
+                    kept_files.append(item)
+                continue
+            if len(raw) > self.valves.MAX_FILE_MB * 1024 * 1024:
+                if self.valves.FAIL_CLOSED:
+                    blocked.append(f"{filename} (больше {self.valves.MAX_FILE_MB} МБ)")
+                else:
+                    kept_files.append(item)
+                continue
+            try:
+                res = self._anonymize(raw, filename)
+            except Exception as e:
+                if self.valves.FAIL_CLOSED:
+                    blocked.append(f"{filename} ({str(e)[:120]})")
+                else:
+                    kept_files.append(item)
+                continue
+            text = (res.get("text") or "").strip()
+            if not text:
+                if self.valves.FAIL_CLOSED:
+                    blocked.append(f"{filename} (после обезличивания не осталось текста)")
+                else:
+                    kept_files.append(item)
+                continue
+            anon_blocks.append(f'<anonymized_document name="{filename}">\n{text}\n</anonymized_document>')
+            maps[file_id] = res.get("map")
+            # Затираем ПДн в записи файла: id остаётся в <attached_files>,
+            # и по нему view_file достал бы оригинал.
+            await self._scrub_file_record(file_id, text)
+
+        # Плашка о заблокированных документах: пользователь должен понять,
+        # почему модель «не видит» файл. Без неё запрос выглядит как пустой.
+        if blocked:
+            note = (
+                "⚠️ Документ НЕ отправлен модели, потому что не удалось его обезличить: "
+                + "; ".join(blocked)
+                + ". Оригинал не покидает систему. Разберитесь с файлом и пришлите снова."
+            )
+            anon_blocks.append(f"<anonymization_notice>\n{note}\n</anonymization_notice>")
+
+        if not anon_blocks:
+            return body
+
+        # Карта — по сессии, чтобы outlet её нашёл (у outlet другое тело).
+        self._save_map(key, {"files": maps, "created": time.time()})
+
+        # Кладём обезличенный текст в последнее сообщение пользователя.
+        msgs = body.get("messages") or []
+        if msgs:
+            last = msgs[-1]
+            content = last.get("content")
+            if isinstance(content, str):
+                content = _strip_attached_files(content)
+                last["content"] = content + "\n\n" + "\n\n".join(anon_blocks)
+            elif isinstance(content, list):
+                content = _strip_attached_files_in_list(content)
+                content.append({"type": "text", "text": "\n\n".join(anon_blocks)})
+            else:
+                last["content"] = "\n\n".join(anon_blocks)
+        else:
+            body["messages"] = [{"role": "user", "content": "\n\n".join(anon_blocks)}]
+
+        # Аудит: что РЕАЛЬНО уходит в модель. Файл внутри контейнера, 0600 —
+        # для проверяющего: так видно, что ПДн не проходят транзитом.
+        # Путь можно переопределить переменной DOCX_ANON_AUDIT.
+        try:
+            audit = os.environ.get("DOCX_ANON_AUDIT") or "/tmp/docx-anon/model_input.log"
+            os.makedirs(os.path.dirname(audit), exist_ok=True)
+            with open(audit, "a", encoding="utf-8") as _f:
+                _f.write("\n=== inlet " + str(int(time.time())) + " ===\n")
+                _f.write(body["messages"][-1].get("content") or "")
+                _f.write("\n")
+            os.chmod(audit, 0o600)
+        except Exception:
+            pass
+
+        # Оригиналы-документы убираем из тела — иначе модель получит и обезличенный
+        # текст, и оригинал (через RAG, view_file или file_context).
+        # Не-документы (картинки) оставляем — они не несут ПДн в тексте.
+        body["files"] = kept_files
+        meta = body.get("metadata")
+        if isinstance(meta, dict):
+            meta["files"] = kept_files
+
+        return body
+
+    async def outlet(self, body: dict, __user__=None, __request__=None) -> dict:
+        """Обратный проход: возвращаем настоящие значения в ответ модели."""
+        key = self._session_key(body)
+        saved = self._load_map(key)
+        if not saved:
+            return body
+        maps = saved.get("files") or {}
+        if not maps:
+            return body
+
+        msgs = body.get("messages") or []
+        if not msgs:
+            return body
+        # Ответ модели — последнее сообщение с ролью assistant. Брать msgs[-1]
+        # нельзя: в теле outlet сообщение пользователя может идти после
+        # ответа (или ответ — не последнее), и тогда восстановление не сработает.
+        target = None
+        for m in reversed(msgs):
+            if isinstance(m, dict) and m.get("role") == "assistant":
+                target = m
+                break
+        if target is None:
+            return body
+        content = target.get("content")
+        if not isinstance(content, str) or len(content) > self.valves.MAX_RESTORE_CHARS:
+            return body
+        if "[" not in content:
+            return body
+
+        # Каждая карта — свой набор меток. Восстанавливает сервис (там ядро
+        # со склонением — «его супруга [ФИО_3]» → «Белоусова»).
+        for file_id, mapping in maps.items():
+            if not mapping:
+                continue
+            try:
+                content = self._restore(content, mapping)
+            except Exception:
+                # Не восстановили — оставляем метки: безопаснее, чем неверные значения.
+                continue
+
+        # Поле output — структурированные блоки ответа (reasoning/output_text).
+        # UI рисует именно их, а не content: без восстановления здесь пользователь
+        # видит метки, хотя content уже восстановлен.
+        output = target.get("output")
+        if isinstance(output, list):
+            for item in output:
+                if not isinstance(item, dict):
+                    continue
+                chunks = item.get("content")
+                if not isinstance(chunks, list):
+                    continue
+                for ch in chunks:
+                    if isinstance(ch, dict) and isinstance(ch.get("text"), str):
+                        try:
+                            ch["text"] = self._restore(ch["text"], list(maps.values())[0])
+                        except Exception:
+                            continue
+
+        target["content"] = content
+        return body
