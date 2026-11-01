@@ -4,7 +4,7 @@
  *
  * Зачем сервис, а не node внутри контейнера open-webui:
  *   - в контейнере open-webui нет node вообще (проверено: node/npm отсутствуют);
- *   - SPEC /config/owui_research/SPEC.md §5 прямо рекомендует «call your own
+ *   - рекомендуемый подход Open WebUI для внешних интеграций: «call your own
  *     local HTTP service over plain HTTP — that is the simplest and needs no
  *     Open WebUI credentials at all».
  *
@@ -28,10 +28,10 @@ import { tmpdir } from 'node:os';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SKILL_DIR = process.env.DOCX_ANON_SKILL_DIR || dirname(HERE);
-const REPO = process.env.DOCX_ANON_REPO || '/config/.hermes/services/docx-anonymizer';
-const NER_DIR = process.env.DOCX_ANON_NER || '/config/.hermes/services/ner';
+const REPO = process.env.DOCX_ANON_REPO || '/srv/repo';
+const NER_DIR = process.env.DOCX_ANON_NER || '/srv/ner';
 const WRAPPER = process.env.DOCX_ANON_WRAPPER || join(SKILL_DIR, 'scripts', 'anonymize.mjs');
-const WORKDIR = process.env.DOCX_ANON_WORKDIR || '/config/.hermes/state/docx-anon';
+const WORKDIR = process.env.DOCX_ANON_WORKDIR || '/srv/state';
 const PORT = Number(process.env.DOCX_ANON_PORT || 8971);
 const HOST = process.env.DOCX_ANON_HOST || '0.0.0.0';
 const COMMERCIAL = process.env.DOCX_ANON_COMMERCIAL !== 'false';

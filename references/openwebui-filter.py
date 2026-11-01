@@ -1,8 +1,8 @@
 """
 Open WebUI Filter (v0.12.0): обезличивание вложений ДО того, как их увидит модель.
 
-Контракт проверен по исходникам open-webui v0.12.0 (snapshot /config/owui_research/v0120)
-и по SPEC /config/owui_research/SPEC.md:
+Контракт проверен по исходникам open-webui v0.12.0
+(https://github.com/open-webui/open-webui/tree/v0.12.0):
 
   * Тип функции определяется по имени класса: Pipe | Filter | Action | Event
     (backend/open_webui/utils/plugin.py:296-306).

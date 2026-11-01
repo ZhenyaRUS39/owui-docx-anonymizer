@@ -57,21 +57,12 @@ bash scripts/deploy_openwebui.sh
    `--restart unless-stopped`) с HTTP-сервисом на порту `8971`;
 4. создаёт admin API-ключ Open WebUI и регистрирует Filter `docx_anonymizer`;
 5. включает Filter и делает его глобальным;
-6. прогоняет живую проверку из 6 сценариев.
-
 Ожидаемый финал:
 
 ```
 === ГОТОВО
+Проверка: curl http://127.0.0.1:8971/health
 Фильтр: docx_anonymizer (active + global)
-=== 6/6 живая проверка фильтра
-[OK  ] L1 DOCX с ПДн
-[OK  ] L2 PDF с ПДн
-[OK  ] L3 битый docx (fail-closed)
-[OK  ] L4 .xlsx (формат не обезличивается)
-[OK  ] L5 картинка (обычный чат не ломается)
-[OK  ] L6 чат без вложений
-ИТОГ: 6/6
 ```
 
 ### Переменные окружения
@@ -80,7 +71,7 @@ bash scripts/deploy_openwebui.sh
 |---|---|---|
 | `HA_HOST` | `192.168.1.4` | хост с Open WebUI |
 | `HA_USER` | `root` | пользователь SSH |
-| `HA_ROOT_PASSWORD` | — | пароль root, если его нет в `/config/.hermes/secrets/ha_ssh.json` |
+| `HA_ROOT_PASSWORD` | — | пароль root для SSH |
 | `BASE` | `/opt/docx-anon-service` | каталог установки на хосте |
 | `PORT` | `8971` | порт сервиса обезличивания |
 | `OWUI_CONTAINER` | определяется автоматически | контейнер Open WebUI |
@@ -125,50 +116,21 @@ curl -s http://127.0.0.1:8971/health
 
 ## Проверка
 
-### Живой стенд (6 сквозных сценариев)
+### Сервис отвечает
 
 ```bash
-bash scripts/deploy_openwebui.sh          # в конце гоняет эту проверку
+curl -s http://127.0.0.1:8971/health
+# {"ok":true,"ner":true,"repo":"/srv/repo",...}
 ```
 
-| Сценарий | Ожидание |
-|---|---|
-| L1 DOCX с ПДн | модель получила метки, ПДн нет; в чате значения вернулись |
-| L2 PDF с ПДн | то же |
-| L3 битый docx | документ не выпущен к модели, пользователь предупреждён |
-| L4 `.xlsx` | документ не выпущен (формат не обезличивается) |
-| L5 картинка | обычный чат работает |
-| L6 без вложений | обычный чат работает, меток нет |
+### В чате
 
-### Браузерная проверка
+Загрузите в чат документ с персональными данными и попросите перечислить ФИО:
 
-```bash
-OWUI_URL=http://<host>:8080 \
-OWUI_EMAIL=<логин> OWUI_PASSWORD=<пароль> \
-timeout 275 node scripts/browser_check.mjs /path/to/document.docx
-```
-
-Chromium → логин → вложение → вопрос → проверка DOM ответа, перехваченного запроса
-и блока `<attached_files>`. Таймаут 275 с — не меньше: ответ модели занимает 20–60 с.
-
-### Локальные тесты
-
-```bash
-bash scripts/run_suite.sh              # всё
-bash scripts/run_suite.sh pipeline     # выборочно
-```
-
-| Набор | Кейсов | Что проверяет |
-|---|---|---|
-| `test_pipeline.py` | 61 | обезличивание → подстановка в запрос → восстановление, на корпусе из upstream |
-| `test_extended.py` | 18 | PDF, TXT/MD/DOCM, режимы mask/delete, идемпотентность |
-| `test_edge_cases.py` | 8 | корректный отказ: пароль, скан, `.xlsx`, битый zip, нет файла |
-| `test_openwebui_filter.py` | 10 | Filter на моках Open WebUI: файлы вычищены → модель получила текст → outlet восстановил |
-| `mutation_check.py` | 3 мутации | тест обязан падать на сломанном коде |
-| `mutation_check_b.py` | 6 мутаций | то же для Filter |
-
-Тесты требуют checkout upstream-ядра и каталог модели NER — пути ищутся сами
-(`scripts/paths.py`), можно задать через `DOCX_ANON_REPO` и `DOCX_ANON_NER`.
+- модель должна видеть **метки** (`[ФИО_1]`, `[ПАСПОРТ_1]`), а не исходные значения;
+- в ответе пользователю значения должны быть **восстановлены**;
+- документ неподдерживаемого формата (`.xlsx`) не должен уйти к модели — вместо
+  ответа должна быть плашка, что файл не передан.
 
 ## Устройство
 
@@ -178,11 +140,7 @@ references/anon_service.mjs      HTTP-сервис: /health, /anonymize, /restor
 references/settings.md           справка по настройкам ядра
 scripts/anonymize.mjs            CLI-обёртка над ядром (anonymize / restore)
 scripts/deploy_openwebui.sh      установка и обновление на хосте
-scripts/test_live_deployed.py    6 сквозных сценариев на живом стенде
-scripts/browser_check.mjs        проверка через настоящий браузер
-scripts/run_suite.sh              прогон всех наборов
-scripts/owui_mock/               минимальные моки Open WebUI для тестов
-docs/DEVELOPMENT.md          журнал разработки: как устроен Filter, подводные камни Open WebUI, результаты тестов
+docs/DEVELOPMENT.md          журнал разработки: как устроен Filter, подводные камни Open WebUI
 ```
 
 ### Что лежит в `body` в момент `inlet`

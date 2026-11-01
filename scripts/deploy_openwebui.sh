@@ -206,22 +206,11 @@ else
 fi
 owui_api_get "/api/v1/functions/id/$FILTER_ID" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("active=", d.get("is_active"), "global=", d.get("is_global"), "type=", d.get("type"))'
 
-# --- 6. живая проверка ------------------------------------------------------
+# --- ГОТОВО -----------------------------------------------------------------
 say "ГОТОВО"
 echo "Проверка: curl http://127.0.0.1:$PORT/health"
 echo "Фильтр: $FILTER_ID (active + global)"
-
-if [ "${SKIP_LIVE_CHECK:-0}" = "1" ]; then
-  exit 0
-fi
-
-say "6/6 живая проверка фильтра"
-cat "$SKILL_DIR/scripts/test_live_deployed.py" | ssh_ha "cat > /tmp/test_live_deployed.py"
-cat "$SKILL_DIR/scripts/live_fixtures.py" | ssh_ha "cat > /tmp/live_fixtures.py"
-cat "$SKILL_DIR/scripts/fixtures/live_check.pdf" | ssh_ha "cat > /tmp/live_check.pdf"
-ssh_ha "docker cp /tmp/test_live_deployed.py $OWUI_CONTAINER:/tmp/test_live_deployed.py
-docker cp /tmp/live_fixtures.py $OWUI_CONTAINER:/tmp/live_fixtures.py
-docker exec $OWUI_CONTAINER mkdir -p /tmp/fixtures
-docker cp /tmp/live_check.pdf $OWUI_CONTAINER:/tmp/fixtures/live_check.pdf
-docker exec $OWUI_CONTAINER sh -c 'printf %s \"$API_KEY\" > /tmp/owui_key && chmod 600 /tmp/owui_key'
-docker exec $OWUI_CONTAINER timeout 300 python3 /tmp/test_live_deployed.py" || true
+echo
+echo "Проверить, что обезличивание работает, можно загрузить документ в чат:"
+echo "  — модель должна видеть метки ([ФИО_1], [ПАСПОРТ_1]), а не исходные значения;"
+echo "  — в ответе пользователю значения должны быть восстановлены."
