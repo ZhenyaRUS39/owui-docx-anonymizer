@@ -98,6 +98,12 @@ class Filter:
         MAX_RESTORE_CHARS: int = 200000
         # Хранить карту замен на диске (WORKDIR). Там лежат исходные ПДн.
         WORKDIR: str = "/tmp/docx-anon"
+        # Сколько часов живёт карта замен. Карта нужна, пока идёт чат:
+        # в inlet создаётся, в outlet читается. Дальше она — просто исходные
+        # ПДн на диске, поэтому старые карты удаляются.
+        MAP_TTL_HOURS: int = 24
+        # Как часто чистить (в inlet, не чаще раза в N секунд).
+        CLEANUP_INTERVAL_SEC: int = 300
 
     def __init__(self):
         self.valves = self.Valves()
@@ -131,6 +137,33 @@ class Filter:
             os.chmod(self._map_path(key), 0o600)
         except Exception:
             pass
+
+    def _cleanup_maps(self) -> None:
+        """Удаляет старые карты замен.
+
+        Карта — это исходные ПДн на диске (0600, только root). После чата
+        она больше не нужна: в outlet карта читается сразу после ответа
+        модели. Без очистки карты копятся бессрочно.
+        """
+        now = time.time()
+        last = getattr(self, "_last_cleanup", 0)
+        if now - last < self.valves.CLEANUP_INTERVAL_SEC:
+            return
+        self._last_cleanup = now
+        ttl = max(0, int(self.valves.MAP_TTL_HOURS)) * 3600
+        try:
+            names = os.listdir(self.valves.WORKDIR)
+        except Exception:
+            return
+        for name in names:
+            if not name.endswith(".json"):
+                continue
+            p = os.path.join(self.valves.WORKDIR, name)
+            try:
+                if now - os.path.getmtime(p) > ttl:
+                    os.remove(p)
+            except Exception:
+                pass
 
     def _session_key(self, body: dict) -> str:
         # outlet получает другое тело, поэтому ключ карты строим на устойчивых полях.
@@ -280,6 +313,9 @@ class Filter:
         items = self._file_items(body)
         if not items:
             return body
+
+        # Периодически убираем старые карты замен (в них лежат исходные ПДн).
+        self._cleanup_maps()
 
         anon_blocks = []
         blocked = []

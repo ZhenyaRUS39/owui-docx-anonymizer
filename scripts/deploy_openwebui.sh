@@ -210,6 +210,15 @@ fi
 owui_api_get "/api/v1/functions/id/$FILTER_ID" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("active=", d.get("is_active"), "global=", d.get("is_global"), "type=", d.get("type"))'
 
 # --- ГОТОВО -----------------------------------------------------------------
+# Backend компилирует функцию и кэширует её на весь процесс: правка в БД
+# видна в function.content, но работающий процесс продолжит исполнять старый
+# код. Поэтому после обновления контейнер перезапускается.
+if [ "${SKIP_RESTART:-0}" != "1" ]; then
+  say "перезапуск $OWUI_CONTAINER (сброс кэша скомпилированной функции)"
+  ssh_ha "docker restart $OWUI_CONTAINER" || true
+  sleep 12
+fi
+
 say "ГОТОВО"
 echo "Проверка: curl http://127.0.0.1:$PORT/health"
 echo "Фильтр: $FILTER_ID (active + global)"
