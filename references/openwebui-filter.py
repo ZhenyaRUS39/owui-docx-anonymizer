@@ -394,6 +394,45 @@ class Filter:
 
         return body
 
+    @staticmethod
+    def _output_text(output) -> str:
+        """Весь текст из структурированных блоков ответа (output)."""
+        if not isinstance(output, list):
+            return ""
+        parts = []
+        for item in output:
+            if not isinstance(item, dict):
+                continue
+            for sub in (item.get("content") or []):
+                if isinstance(sub, dict) and sub.get("text"):
+                    parts.append(str(sub["text"]))
+        return " ".join(parts)
+
+    def _may_contain_marks(self, content: str, maps: dict) -> bool:
+        """Есть ли в тексте хоть одна метка — со скобками или без.
+
+        Модель часто переписывает метку («**ФИО_1**», «ФИО_1»), поэтому
+        проверять только «[» нельзя: так ушёл бы ответ с восстановленными
+        значениями. Но и проверять только голые метки нельзя — они короткие
+        и встречаются в обычном тексте («счёт 1»).
+        """
+        if "[" in content:
+            return True
+        # Голые метки: ищем по префиксу категории из карты (ФИО_1, ПАСПОРТ_1…),
+        # причём с границей по слову, чтобы «счёт 1» не считалось меткой.
+        # В placeholder категории может быть префикс: «ООО «[КОМПАНИЯ_1]»» —
+        # берём внутреннюю метку, иначе по ней ничего не найдётся.
+        for mapping in maps.values():
+            for entry in ((mapping or {}).get("entries") or []):
+                ph = str(entry.get("placeholder") or "")
+                inner = re.search(r"\[([^\[\]]+)\]", ph)
+                bare = inner.group(1) if inner else ph.strip("[]")
+                if not bare:
+                    continue
+                if re.search(r"(?<![\w])" + re.escape(bare) + r"(?![\w])", content):
+                    return True
+        return False
+
     async def outlet(self, body: dict, __user__=None, __request__=None) -> dict:
         """Обратный проход: возвращаем настоящие значения в ответ модели."""
         key = self._session_key(body)
@@ -420,7 +459,14 @@ class Filter:
         content = target.get("content")
         if not isinstance(content, str) or len(content) > self.valves.MAX_RESTORE_CHARS:
             return body
-        if "[" not in content:
+        # Поле output — структурированные блоки ответа (reasoning/output_text).
+        # UI рисует именно их, а не content: без восстановления здесь пользователь
+        # видит метки, хотя content уже восстановлен. Поэтому ранний выход
+        # смотрит и на content, и на output.
+        output = target.get("output")
+        if not self._may_contain_marks(content, maps) and not self._may_contain_marks(
+            self._output_text(output), maps
+        ):
             return body
 
         # Каждая карта — свой набор меток. Восстанавливает сервис (там ядро
@@ -434,10 +480,6 @@ class Filter:
                 # Не восстановили — оставляем метки: безопаснее, чем неверные значения.
                 continue
 
-        # Поле output — структурированные блоки ответа (reasoning/output_text).
-        # UI рисует именно их, а не content: без восстановления здесь пользователь
-        # видит метки, хотя content уже восстановлен.
-        output = target.get("output")
         if isinstance(output, list):
             for item in output:
                 if not isinstance(item, dict):
