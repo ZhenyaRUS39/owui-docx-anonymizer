@@ -85,21 +85,21 @@ echo "контейнер: $OWUI_CONTAINER"
 
 # --- 1. ядро upstream и модель NER -----------------------------------------
 say "1/6 ядро upstream и модель NER → $BASE"
+# Если репозиторий уже есть, но на другой версии — переключаем.
+# Сравниваем по версии в package.json (тегов в shallow-клоне нет).
+if ssh_ha "[ -d $BASE/repo/.git ]"; then
+  HAVE=$(ssh_ha "grep -m1 version $BASE/repo/package.json 2>/dev/null | tr -dc '0-9.'" || echo unknown)
+  WANT="${CORE_VERSION#v}"
+  if [ "$HAVE" != "$WANT" ]; then
+    say "     ядро на версии $HAVE, переключаем на $WANT"
+    ssh_ha "cd $BASE/repo && git fetch --depth 1 origin $CORE_VERSION && git checkout -q FETCH_HEAD"
+  fi
+fi
 ssh_ha "set -e
 mkdir -p $BASE
 if [ ! -d $BASE/repo/.git ]; then
   rm -rf $BASE/repo
   git clone --depth 1 --branch "$CORE_VERSION" https://github.com/argmaster-dev/docx-anonymizer.git $BASE/repo
-fi
-# Если репозиторий уже есть, но на другой версии — переключаем.
-# Сравниваем по версии в package.json (тегов в shallow-клоне нет).
-if [ -d $BASE/repo/.git ]; then
-  HAVE=$(ssh_ha "grep -m1 '\"version\"' $BASE/repo/package.json 2>/dev/null | sed 's/.*: *\"\([^\"]*\)\".*/\1/'" 2>/dev/null || echo unknown)
-  WANT="${CORE_VERSION#v}"
-  if [ "$HAVE" != "$WANT" ]; then
-    echo "     ядро на версии $HAVE, переключаем на $WANT"
-    ssh_ha "cd $BASE/repo && git fetch --depth 1 origin \"$CORE_VERSION\" && git checkout -q FETCH_HEAD"
-  fi
 fi
 if [ ! -d $BASE/repo/node_modules ]; then
   docker run --rm -v $BASE/repo:/w -w /w node:22-alpine sh -c 'npm ci --no-audit --no-fund'
