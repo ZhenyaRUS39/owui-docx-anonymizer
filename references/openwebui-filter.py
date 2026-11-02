@@ -883,13 +883,10 @@ class Filter:
         except Exception:
             pass
 
-        # body["files"] уже очищен выше (до подмешивания) — здесь только
-        # страховка на случай, если появится новый код после этой точки.
-        body["files"] = kept_files
-        meta = body.get("metadata")
-        if isinstance(meta, dict):
-            meta["files"] = kept_files
-
+        # body["files"] и metadata["files"] уже очищены выше — до
+        # подмешивания обезличенного текста. Дублировать очистку здесь не
+        # нужно: два присваивания рассинхронизируются, а мутационная
+        # проверка перестаёт видеть поломку (заменяется только первое).
         return body
 
     @staticmethod
