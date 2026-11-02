@@ -134,12 +134,16 @@ bash scripts/deploy_openwebui.sh
 
 Он делает следующее:
 
-1. клонирует ядро upstream в `/opt/docx-anon-service/repo` и ставит зависимости (`npm ci`);
+1. клонирует ядро upstream **на теге `v0.4.0`** в `/opt/docx-anon-service/repo`
+   и ставит зависимости (`npm ci`);
 2. скачивает модель распознавания персональных данных (ONNX, ~30 МБ) в `/opt/docx-anon-service/ner`;
-3. поднимает контейнер `docx-anon-service` (`node:22-alpine`, `--network host`,
+3. тянет готовый образ сервиса `ghcr.io/zhenyarus39/owui-docx-anonymizer-service:latest`
+   (в нём уже есть LibreOffice для `.doc`); если реестр недоступен — собирает
+   образ локально (на 5–10 минут дольше);
+4. поднимает контейнер `docx-anon-service` (`--network host`,
    `--restart unless-stopped`) с HTTP-сервисом на порту `8971`;
-4. создаёт admin API-ключ Open WebUI и регистрирует Filter `docx_anonymizer`;
-5. включает Filter и делает его глобальным;
+5. создаёт admin API-ключ Open WebUI и регистрирует Filter `docx_anonymizer`;
+6. включает Filter и делает его глобальным;
 Ожидаемый финал:
 
 ```
@@ -147,6 +151,10 @@ bash scripts/deploy_openwebui.sh
 Проверка: curl http://127.0.0.1:8971/health
 Фильтр: docx_anonymizer (active + global)
 ```
+
+> **Версия ядра зафиксирована на `v0.4.0`.** В `v0.5.0` upstream поменял API
+> ядра (`adapterForKind`/`parsePackage` вместо `parseDocx`/`serializeDocx`),
+> и фильтр с ним не работает. Не меняй `CORE_VERSION` без проверки.
 
 ### Переменные окружения
 
@@ -161,6 +169,8 @@ bash scripts/deploy_openwebui.sh
 | `OWUI_URL` | `http://127.0.0.1:8080` | адрес Open WebUI внутри хоста |
 | `FILTER_ID` | `docx_anonymizer` | id функции-фильтра |
 | `SKIP_LIVE_CHECK` | `0` | `1` — не гонять живую проверку в конце |
+| `CORE_VERSION` | `v0.4.0` | версия ядра upstream |
+| `GHCR_IMAGE` | `ghcr.io/zhenyarus39/owui-docx-anonymizer-service:latest` | образ сервиса |
 
 ### Ручная установка
 

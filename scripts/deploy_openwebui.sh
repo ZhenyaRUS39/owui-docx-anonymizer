@@ -35,6 +35,11 @@ HA_USER="${HA_USER:-root}"
 BASE="${BASE:-/opt/docx-anon-service}"
 PORT="${PORT:-8971}"
 FILTER_ID="${FILTER_ID:-docx_anonymizer}"
+# Версия ядра upstream. Ядро берём на ТЕГЕ, а не с main: в v0.5.0 upstream
+# поменял API ядра (adapterForKind/parsePackage вместо
+# parseDocx/serializeDocx), и фильтр с ним не работает.
+# Проверено: v0.4.0 — рабочая версия. Не менять без проверки!
+CORE_VERSION="${CORE_VERSION:-v0.4.0}"
 OWUI_URL="${OWUI_URL:-http://127.0.0.1:8080}"
 # Имя контейнера привязано к порту: иначе вторая установка (для теста, на
 # другом порту) пересоздаст контейнер первой и уронит работающий сервис.
@@ -82,20 +87,18 @@ echo "контейнер: $OWUI_CONTAINER"
 say "1/6 ядро upstream и модель NER → $BASE"
 ssh_ha "set -e
 mkdir -p $BASE
-# Ядро берём на ТЕГЕ CORE_VERSION, а не с main: в v0.5.0 upstream поменял
-# API ядра (adapterForKind/parsePackage вместо parseDocx/serializeDocx),
-# и фильтр с ним не работает. Проверено: v0.4.0 — рабочая версия.
-CORE_VERSION="${CORE_VERSION:-v0.4.0}"
 if [ ! -d $BASE/repo/.git ]; then
   rm -rf $BASE/repo
-  git clone --depth 1 --branch $CORE_VERSION https://github.com/argmaster-dev/docx-anonymizer.git $BASE/repo
+  git clone --depth 1 --branch "$CORE_VERSION" https://github.com/argmaster-dev/docx-anonymizer.git $BASE/repo
 fi
 # Если репозиторий уже есть, но на другой версии — переключаем.
+# Сравниваем по версии в package.json (тегов в shallow-клоне нет).
 if [ -d $BASE/repo/.git ]; then
-  HAVE=$(ssh_ha "cd $BASE/repo && git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD" 2>/dev/null || echo unknown)
-  if [ "$HAVE" != "$CORE_VERSION" ]; then
-    echo "     ядро на $HAVE, переключаем на $CORE_VERSION"
-    ssh_ha "cd $BASE/repo && git fetch --depth 1 origin $CORE_VERSION && git checkout -q FETCH_HEAD"
+  HAVE=$(ssh_ha "grep -m1 '\"version\"' $BASE/repo/package.json 2>/dev/null | sed 's/.*: *\"\([^\"]*\)\".*/\1/'" 2>/dev/null || echo unknown)
+  WANT="${CORE_VERSION#v}"
+  if [ "$HAVE" != "$WANT" ]; then
+    echo "     ядро на версии $HAVE, переключаем на $WANT"
+    ssh_ha "cd $BASE/repo && git fetch --depth 1 origin \"$CORE_VERSION\" && git checkout -q FETCH_HEAD"
   fi
 fi
 if [ ! -d $BASE/repo/node_modules ]; then
