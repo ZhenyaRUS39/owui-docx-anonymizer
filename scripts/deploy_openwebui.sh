@@ -22,6 +22,9 @@
 #   FILTER_ID=docx_anonymizer    id функции-фильтра
 #   SKIP_LIVE_CHECK=1            не гонять живую проверку в конце
 #   CORE_VERSION=v0.4.0          версия ядра upstream (не менять без проверки!)
+#   GHCR_IMAGE=ghcr.io/...       образ сервиса из реестра (приватный — нужен
+#                                docker login в реестр на хосте)
+#   SERVICE_IMAGE=...            свой образ, если не нужен GHCR
 #   LIVE_SRC=<каталог>           каталог со скриптами живой проверки. Если они есть
 #                                (в скилле агента) — скрипт запустит проверку после
 #                                установки; если нет — проверка пропускается.
@@ -125,18 +128,25 @@ say "3/6 контейнер $SERVICE_NAME"
 # LibreOffice нужен для разбора .doc (бинарный Word 97–2003): больше никто
 # в этом окружении .doc не читает. Ставим в образ сервиса, чтобы был
 # доступен и при пересоздании контейнера.
-SERVICE_IMAGE="${SERVICE_IMAGE:-node:22-alpine}"
-if [ "$SERVICE_IMAGE" = "node:22-alpine" ]; then
-  say "     сборка образа с LibreOffice (нужен для .doc)"
-  ssh_ha "docker rm -f ${SERVICE_NAME}-img 2>/dev/null || true"
-  ssh_ha "docker run --name ${SERVICE_NAME}-img $SERVICE_IMAGE sh -c \"apk add --no-cache libreoffice-writer >/dev/null 2>&1 && echo INSTALLED\"" || true
-  ssh_ha "docker commit ${SERVICE_NAME}-img ${SERVICE_NAME}-img:lo 2>/dev/null || true"
-  ssh_ha "docker rm -f ${SERVICE_NAME}-img 2>/dev/null || true"
-  if ssh_ha "docker image inspect ${SERVICE_NAME}-img:lo >/dev/null 2>&1"; then
-    SERVICE_IMAGE="${SERVICE_NAME}-img:lo"
-    say "     образ $SERVICE_IMAGE"
-  else
-    say "     LibreOffice не установился — .doc будет блокироваться"
+# Образ сервиса: тянем готовый из GHCR (в нём уже есть LibreOffice для .doc).
+# Если pull не удался (нет доступа к реестру) — собираем локально: дольше на
+# несколько минут, но работает без реестра.
+GHCR_IMAGE="${GHCR_IMAGE:-ghcr.io/zhenyarus39/owui-docx-anonymizer-service:latest}"
+SERVICE_IMAGE="${SERVICE_IMAGE:-$GHCR_IMAGE}"
+if [ -z "${SERVICE_IMAGE_PRESET:-}" ]; then
+  say "     образ $SERVICE_IMAGE (pull из GHCR)"
+  if ! ssh_ha "docker pull $SERVICE_IMAGE" >/dev/null 2>&1; then
+    say "     pull не удался — собираем локально (5-10 минут)"
+    ssh_ha "docker rm -f ${SERVICE_NAME}-img 2>/dev/null || true"
+    ssh_ha "docker run --name ${SERVICE_NAME}-img node:22-alpine sh -c \"apk add --no-cache libreoffice-writer >/dev/null 2>&1 && echo INSTALLED\"" || true
+    ssh_ha "docker commit ${SERVICE_NAME}-img ${SERVICE_NAME}-img:lo 2>/dev/null || true"
+    ssh_ha "docker rm -f ${SERVICE_NAME}-img 2>/dev/null || true"
+    if ssh_ha "docker image inspect ${SERVICE_NAME}-img:lo >/dev/null 2>&1"; then
+      SERVICE_IMAGE="${SERVICE_NAME}-img:lo"
+      say "     образ $SERVICE_IMAGE"
+    else
+      die "не удалось ни скачать образ, ни собрать локально"
+    fi
   fi
 fi
 ssh_ha "docker rm -f $SERVICE_NAME 2>/dev/null || true

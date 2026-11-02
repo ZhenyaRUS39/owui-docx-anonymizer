@@ -80,6 +80,22 @@ sshpass -p "$HA_ROOT_PASSWORD" ssh -o StrictHostKeyChecking=no \
 Ожидаемо: имя контейнера Open WebUI (например `app_4696b1a1_open-webui`).
 Если пусто — Open WebUI не на этом хосте, проверь `HA_HOST`.
 
+### Образ сервиса: доступ к реестру
+
+Образ `ghcr.io/zhenyarus39/owui-docx-anonymizer-service:latest` **приватный**.
+Если на хосте нет доступа к реестру, скрипт сам соберёт образ локально
+(на 5–10 минут дольше) — установка всё равно пройдёт.
+
+Чтобы тянуть готовый образ, залогинься на хосте:
+
+```bash
+sshpass -p "$HA_ROOT_PASSWORD" ssh root@"$HA_HOST" \
+  'echo "<gh-токен>" | docker login ghcr.io -u ZhenyaRUS39 --password-stdin'
+```
+
+Токен — GitHub PAT с правом `read:packages` (или `write:packages`).
+Без логина скрипт перейдёт к локальной сборке — это не ошибка.
+
 ---
 
 ## Шаг 3. Установить
