@@ -359,7 +359,8 @@ if [ -n "$LIVE_SRC" ] && [ -f "$LIVE_SRC/scripts/test_live_deployed.py" ]; then
 docker cp /tmp/live_fixtures.py $OWUI_CONTAINER:/tmp/live_fixtures.py
 docker exec $OWUI_CONTAINER mkdir -p /tmp/fixtures
 docker cp /tmp/live_check.pdf $OWUI_CONTAINER:/tmp/fixtures/live_check.pdf
-docker exec $OWUI_CONTAINER sh -c 'printf %s \"$API_KEY\" > /tmp/owui_key && chmod 600 /tmp/owui_key'
+# Ключ кладём в постоянный каталог (/tmp стирается при рестарте контейнера)
+docker exec $OWUI_CONTAINER sh -c 'mkdir -p /app/backend/data/.deploy && printf %s \"$API_KEY\" > /app/backend/data/.deploy/owui_key && chmod 600 /app/backend/data/.deploy/owui_key && ln -sf /app/backend/data/.deploy/owui_key /tmp/owui_key'
 docker exec $OWUI_CONTAINER timeout 300 python3 /tmp/test_live_deployed.py" || true
 else
   echo

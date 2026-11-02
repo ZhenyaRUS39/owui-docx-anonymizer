@@ -66,7 +66,9 @@ function ooxmlText(files, tags) {
       }
     }
   }
-  return parts.join(' ').replace(/\s+/g, ' ').trim();
+  // Каждая ячейка/значение — своя строка: склейка пробелом ломает разбор
+  // (значения из разных ячеек сливаются, ядро не находит сущность).
+  return parts.join('\n').replace(/[ \t]+/g, ' ').trim();
 }
 
 /**
@@ -133,14 +135,34 @@ function pptxText(files) {
     .sort();
   for (const name of names) {
     const xml = Buffer.from(files[name]).toString('utf-8');
-    const parts = [];
-    const re = /<a:t(?:\s[^>]*)?>([\s\S]*?)<\/a:t>/g;
-    let m;
-    while ((m = re.exec(xml)) !== null) {
-      const t = xmlText(m[1]);
-      if (t) parts.push(t);
+    // Абзац — <a:p>, внутри — runs <a:t>. Границы абзацев сохраняем:
+    // без них «выдан 12.05.2015 Зарегистрирован по адресу: ...» склеивается
+    // в одну строку, и ядро не находит адрес (его поглощает спан паспорта).
+    const paras = [];
+    const pre = /<a:p(?:\s[^>]*)?>([\s\S]*?)<\/a:p>/g;
+    let pm;
+    while ((pm = pre.exec(xml)) !== null) {
+      const runs = [];
+      const re = /<a:t(?:\s[^>]*)?>([\s\S]*?)<\/a:t>/g;
+      let m;
+      while ((m = re.exec(pm[1])) !== null) {
+        const t = xmlText(m[1]);
+        if (t) runs.push(t);
+      }
+      if (runs.length) paras.push(runs.join(''));
     }
-    if (parts.length) slides.push(parts.join(' '));
+    if (!paras.length) {
+      // Слайд без <a:p> (бывает в сырых файлах) — берём все <a:t>.
+      const parts = [];
+      const re = /<a:t(?:\s[^>]*)?>([\s\S]*?)<\/a:t>/g;
+      let m;
+      while ((m = re.exec(xml)) !== null) {
+        const t = xmlText(m[1]);
+        if (t) parts.push(t);
+      }
+      if (parts.length) paras.push(parts.join(' '));
+    }
+    if (paras.length) slides.push(paras.join('\n'));
   }
   return slides.join('\n').trim();
 }

@@ -747,10 +747,14 @@ class Filter:
                 if not text_in:
                     text_in = await self._read_extracted_text(file_id)
                 if not text_in:
-                    # Текст не извлечён (разбор не завершён или пусто) —
-                    # выпускать нечего, но и блокировать нечего: файла с ПДн
-                    # в модели не будет. Пропускаем как есть.
-                    kept_files.append(item)
+                    # Текст не извлечён (разбор не завершён или пусто).
+                    # Файл выпускать нельзя: его id остаётся в теле запроса,
+                    # а по id модель достаёт оригинал через view_file.
+                    # Значит — блокируем (fail-closed) и убираем id из тела.
+                    if self.valves.FAIL_CLOSED:
+                        blocked.append(f"{filename} (не удалось извлечь текст)")
+                    else:
+                        kept_files.append(item)
                     continue
                 try:
                     res = self._anonymize(text_in.encode("utf-8"), filename + ".txt")
@@ -823,7 +827,27 @@ class Filter:
             )
             anon_blocks.append(f"<anonymization_notice>\n{note}\n</anonymization_notice>")
 
+        # Оригиналы-документы убираем из тела ВСЕГДА, даже если нечего
+        # подмешивать: иначе id документа с ПДн остаётся в запросе, и модель
+        # достаёт оригинал через view_file. Пустой случай — это «всё
+        # заблокировано», а не «ничего не делать».
+        body["files"] = kept_files
+        meta = body.get("metadata")
+        if isinstance(meta, dict):
+            meta["files"] = kept_files
+
         if not anon_blocks:
+            # Ничего обезличивать не удалось и блокировать нечего (например,
+            # только картинки) — убираем ссылки на файлы из сообщений, чтобы
+            # оригиналы не достать через view_file.
+            msgs0 = body.get("messages") or []
+            if msgs0:
+                last0 = msgs0[-1]
+                content0 = last0.get("content")
+                if isinstance(content0, str):
+                    last0["content"] = _strip_attached_files(content0)
+                elif isinstance(content0, list):
+                    last0["content"] = _strip_attached_files_in_list(content0)
             return body
 
         # Карта — по сессии, чтобы outlet её нашёл (у outlet другое тело).
@@ -859,9 +883,8 @@ class Filter:
         except Exception:
             pass
 
-        # Оригиналы-документы убираем из тела — иначе модель получит и обезличенный
-        # текст, и оригинал (через RAG, view_file или file_context).
-        # Не-документы (картинки) оставляем — они не несут ПДн в тексте.
+        # body["files"] уже очищен выше (до подмешивания) — здесь только
+        # страховка на случай, если появится новый код после этой точки.
         body["files"] = kept_files
         meta = body.get("metadata")
         if isinstance(meta, dict):
