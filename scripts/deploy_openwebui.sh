@@ -246,7 +246,21 @@ ssh_ha "curl -s -o /dev/null -w 'valves: %{http_code}\n' -X POST -H 'Authorizati
 if [ "${SKIP_RESTART:-0}" != "1" ]; then
   say "перезапуск $OWUI_CONTAINER (сброс кэша скомпилированной функции)"
   ssh_ha "docker restart $OWUI_CONTAINER" || true
-  sleep 12
+  # Ждём не фиксированное время, а готовность: Open WebUI поднимается дольше
+  # 12 секунд, и живая проверка внутри деплоя падала с «Expecting value»
+  # (API ещё не отвечал). Ожидаем /health до 180 секунд.
+  OWUI_READY=0
+  for _ in $(seq 1 60); do
+    if ssh_ha "curl -s -m 5 -o /dev/null -w '%{http_code}' ${OWUI_URL}/health 2>/dev/null" 2>/dev/null | grep -q '200'; then
+      OWUI_READY=1
+      break
+    fi
+    sleep 3
+  done
+  if [ "$OWUI_READY" != "1" ]; then
+    die "Open WebUI не поднялся после рестарта (health не ответил)"
+  fi
+  say "Open WebUI готов"
 fi
 
 say "ГОТОВО"
