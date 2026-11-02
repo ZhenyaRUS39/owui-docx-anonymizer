@@ -100,6 +100,7 @@ ls $BASE/repo/node_modules | wc -l"
 say "2/6 сервис и обёртка в $BASE/anon"
 ssh_ha "mkdir -p $BASE/anon/scripts $BASE/state"
 cat "$SKILL_DIR/references/anon_service.mjs" | ssh_ha "cat > $BASE/anon/anon_service.mjs"
+cat "$SKILL_DIR/references/office_extract.mjs" | ssh_ha "cat > $BASE/anon/office_extract.mjs"
 cat "$SKILL_DIR/scripts/anonymize.mjs" | ssh_ha "cat > $BASE/anon/scripts/anonymize.mjs"
 
 # --- 3. контейнер сервиса ---------------------------------------------------
@@ -107,6 +108,23 @@ cat "$SKILL_DIR/scripts/anonymize.mjs" | ssh_ha "cat > $BASE/anon/scripts/anonym
 # localhost — токен обязателен (сервис сам не стартует без него).
 SERVICE_TOKEN="${SERVICE_TOKEN:-$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')}"
 say "3/6 контейнер $SERVICE_NAME"
+# LibreOffice нужен для разбора .doc (бинарный Word 97–2003): больше никто
+# в этом окружении .doc не читает. Ставим в образ сервиса, чтобы был
+# доступен и при пересоздании контейнера.
+SERVICE_IMAGE="${SERVICE_IMAGE:-node:22-alpine}"
+if [ "$SERVICE_IMAGE" = "node:22-alpine" ]; then
+  say "     сборка образа с LibreOffice (нужен для .doc)"
+  ssh_ha "docker rm -f ${SERVICE_NAME}-img 2>/dev/null || true"
+  ssh_ha "docker run --name ${SERVICE_NAME}-img $SERVICE_IMAGE sh -c \"apk add --no-cache libreoffice-writer >/dev/null 2>&1 && echo INSTALLED\"" || true
+  ssh_ha "docker commit ${SERVICE_NAME}-img ${SERVICE_NAME}-img:lo 2>/dev/null || true"
+  ssh_ha "docker rm -f ${SERVICE_NAME}-img 2>/dev/null || true"
+  if ssh_ha "docker image inspect ${SERVICE_NAME}-img:lo >/dev/null 2>&1"; then
+    SERVICE_IMAGE="${SERVICE_NAME}-img:lo"
+    say "     образ $SERVICE_IMAGE"
+  else
+    say "     LibreOffice не установился — .doc будет блокироваться"
+  fi
+fi
 ssh_ha "docker rm -f $SERVICE_NAME 2>/dev/null || true
 docker run -d --name $SERVICE_NAME \
   --network host --restart unless-stopped \
@@ -116,7 +134,7 @@ docker run -d --name $SERVICE_NAME \
   -e DOCX_ANON_WRAPPER=/srv/anon/scripts/anonymize.mjs \
   -e DOCX_ANON_WORKDIR=/srv/state -e DOCX_ANON_PORT=$PORT \
   -e DOCX_ANON_TOKEN=$SERVICE_TOKEN -e DOCX_ANON_HOST=127.0.0.1 \
-  -w /srv/anon node:22-alpine node /srv/anon/anon_service.mjs"
+  -w /srv/anon $SERVICE_IMAGE node /srv/anon/anon_service.mjs"
 sleep 5
 HEALTH=$(ssh_ha "curl -s -m 10 http://127.0.0.1:$PORT/health")
 echo "$HEALTH"

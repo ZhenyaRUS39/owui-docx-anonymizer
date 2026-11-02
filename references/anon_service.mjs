@@ -25,6 +25,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join, resolve, extname, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 import { tmpdir } from 'node:os';
+import { extractOfficeText } from './office_extract.mjs';
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SKILL_DIR = process.env.DOCX_ANON_SKILL_DIR || dirname(HERE);
@@ -253,6 +254,34 @@ const server = createServer(async (req, res) => {
       } catch (e) {
         log('anonymize failed:', e.message);
         return json(res, 422, { error: 'ANONYMIZE_FAILED', detail: String(e.message || e) });
+      }
+    }
+
+    if (req.method === 'POST' && url.pathname === '/extract') {
+      // Извлечение текста из офисных форматов, которые не читает ядро:
+      // xlsx, pptx, odt, doc. Сделано в сервисе, а не в Open WebUI,
+      // чтобы не зависеть от его разборщиков (Pandoc/LibreOffice).
+      const chunks = [];
+      for await (const c of req) chunks.push(c);
+      const body = Buffer.concat(chunks);
+      const ct = req.headers['content-type'] || '';
+      const m = /boundary=(?:"([^"]+)"|([^;]+))/i.exec(ct);
+      if (!m) return json(res, 400, { error: 'NO_BOUNDARY' });
+      const parts = parseMultipart(body, m[1] || m[2]);
+      const file = parts.find((p) => p.name === 'file') || parts[0];
+      if (!file || !file.data.length) return json(res, 400, { error: 'NO_FILE' });
+      try {
+        const r = await extractOfficeText(file.data, file.filename || '', REPO);
+        if (!r || !r.text || !r.text.trim()) {
+          return json(res, 422, {
+            error: 'EXTRACT_FAILED',
+            detail: 'формат не поддерживается или текст не найден',
+          });
+        }
+        return json(res, 200, { text: r.text, kind: r.kind });
+      } catch (e) {
+        log('extract failed:', e.message);
+        return json(res, 422, { error: 'EXTRACT_FAILED', detail: String(e.message || e) });
       }
     }
 

@@ -181,9 +181,15 @@ class Filter:
     # Классификация вложений — три класса:
     #   MEDIA      — картинки/аудио/видео: пропускаем как есть (текстовых ПДн нет)
     #   DOCUMENT   — форматы, которые ядро обезличивает: обезличиваем
-    #   UNSUPPORTED— документы других форматов (xlsx/pptx/doc/odt…): БЛОКИРУЕМ,
-    #                потому что обезличить их нечем, а ПДн внутри вполне могут быть.
+    #   EXTRACTED  — форматы, которые читает Open WebUI, но не ядро (xlsx/pptx/
+    #                odt/doc): обезличиваем извлечённый текст
+    #   UNSUPPORTED— форматы, которые не читает никто: БЛОКИРУЕМ, потому что
+    #                обезличить нечем, а ПДн внутри вполне могут быть.
     DOC_EXTS = {".docx", ".docm", ".pdf", ".txt", ".md", ".text"}
+    # Форматы, которые Open WebUI умеет разбирать сам (xlsx/pptx/odt/doc), но
+    # которые ядро обезличивания не читает. Их текст Open WebUI извлекает в
+    # files.data['content'] — обезличиваем именно его (как обычный текст).
+    EXTRACTED_EXTS = {".xlsx", ".xls", ".xlsm", ".pptx", ".pptm", ".odt", ".ods", ".odp", ".doc"}
     MEDIA_EXTS = {
         ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".tiff", ".tif",
         ".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac",
@@ -210,6 +216,8 @@ class Filter:
         ext = os.path.splitext(name)[1] if "." in name else ""
         if ext in cls.DOC_EXTS:
             return "document"
+        if ext in cls.EXTRACTED_EXTS:
+            return "extracted"
         if ext in cls.MEDIA_EXTS:
             return "media"
         ctype = ((meta or {}).get("content_type") or "").lower()
@@ -252,6 +260,16 @@ class Filter:
             # чем отдать ПДн.
             raise RuntimeError(f"не удалось обезличить запись файла {file_id}")
 
+    async def _file_record(self, file_id: str):
+        """Запись файла из БД: (имя файла, data). Байты не читаем."""
+        from open_webui.models.files import Files
+
+        file = await Files.get_file_by_id(file_id)
+        if not file:
+            return "", {}
+        return (getattr(file, "filename", "") or "",
+                (getattr(file, "data", None) or {}))
+
     async def _read_bytes(self, file_id: str):
         """Сырые байты файла через storage-провайдер."""
         from open_webui.models.files import Files
@@ -275,6 +293,27 @@ class Filter:
                 raw = content.encode("utf-8")
         return raw, getattr(file, "filename", "") or ""
 
+    async def _read_extracted_text(self, file_id: str):
+        """Текст, который Open WebUI уже извлёк из файла (xlsx/pptx/odt/doc).
+
+        Для этих форматов байты файла ядру бесполезны (оно их не читает),
+        а Open WebUI разбирает их сам и кладёт текст в files.data['content'].
+        Именно этот текст уходит в модель — значит обезличивать надо его.
+        """
+        from open_webui.models.files import Files
+
+        file = await Files.get_file_by_id(file_id)
+        if not file:
+            return None
+        data = getattr(file, "data", None) or {}
+        content = data.get("content")
+        if not isinstance(content, str) or not content.strip():
+            return None
+        # Если обработка не завершилась (ошибка разбора) — текста нет.
+        if data.get("status") not in (None, "completed"):
+            return None
+        return content
+
     def _auth(self) -> dict:
         # Заголовки для сервиса обезличивания. Токен обязателен, если сервис
         # слушает не только localhost (DOCX_ANON_HOST).
@@ -292,6 +331,31 @@ class Filter:
         if r.status_code != 200:
             raise RuntimeError(f"anonymize HTTP {r.status_code}: {r.text[:200]}")
         return r.json()
+
+    def _extract(self, raw: bytes, filename: str):
+        """Извлечение текста из офисного формата силами сервиса.
+
+        Сервис умеет xlsx/pptx/odt/doc своими парсерами (без Pandoc и
+        LibreOffice). Open WebUI тоже умеет xlsx/pptx/odt, но doc требует
+        LibreOffice, а odt упирается в Pandoc. Поэтому сначала пробуем
+        сервис, и только если он не смог — берём текст, извлечённый
+        самим Open WebUI.
+        """
+        files = {"file": (filename or "document.bin", raw)}
+        r = requests.post(
+            self._service("/extract"),
+            files=files,
+            headers=self._auth(),
+            timeout=self.valves.TIMEOUT,
+        )
+        if r.status_code != 200:
+            return None
+        try:
+            data = r.json()
+        except Exception:
+            return None
+        text = (data.get("text") or "").strip()
+        return text or None
 
     def _restore(self, text: str, mapping: dict):
         r = requests.post(
@@ -340,23 +404,69 @@ class Filter:
             file_id = item.get("id")
             if not file_id:
                 continue
-            raw, filename = await self._read_bytes(file_id)
-            if not raw:
-                continue
             meta = item.get("meta") or {}
+            filename, _fdata = await self._file_record(file_id)
             kind = self._classify(filename, meta)
             if kind == "media":
                 # Картинка/аудио/видео — не документ. Пропускаем как есть:
                 # обезличивать нечего, а блокировать обычный чат нельзя.
                 kept_files.append(item)
                 continue
+            if kind == "extracted":
+                # xlsx/pptx/odt/doc: байты файла ядро не читает, но текст
+                # из этих файлов уходит в модель — значит обезличивать надо
+                # именно его. Текст добываем в два шага:
+                #   1) сервис разбирает файл своими парсерами (xlsx/pptx/odt/doc);
+                #   2) если не вышло — берём текст, который Open WebUI уже
+                #      извлёк и сложил в files.data['content'].
+                raw, filename = await self._read_bytes(file_id)
+                if not raw:
+                    continue
+                text_in = None
+                try:
+                    text_in = self._extract(raw, filename)
+                except Exception:
+                    text_in = None
+                if not text_in:
+                    text_in = await self._read_extracted_text(file_id)
+                if not text_in:
+                    # Текст не извлечён (разбор не завершён или пусто) —
+                    # выпускать нечего, но и блокировать нечего: файла с ПДн
+                    # в модели не будет. Пропускаем как есть.
+                    kept_files.append(item)
+                    continue
+                try:
+                    res = self._anonymize(text_in.encode("utf-8"), filename + ".txt")
+                except Exception as e:
+                    if self.valves.FAIL_CLOSED:
+                        blocked.append(f"{filename} ({str(e)[:120]})")
+                    else:
+                        kept_files.append(item)
+                    continue
+                anon_text = (res.get("text") or "").strip()
+                if not anon_text:
+                    if self.valves.FAIL_CLOSED:
+                        blocked.append(f"{filename} (не удалось обезличить)")
+                    else:
+                        kept_files.append(item)
+                    continue
+                maps[file_id] = res.get("map")
+                anon_blocks.append(
+                    f'<anonymized_document name="{filename}" source="extracted">\n{anon_text}\n</anonymized_document>')
+                await self._scrub_file_record(file_id, anon_text)
+                continue
             if kind == "unsupported":
-                # Документ формата, который ядро не читает (xlsx/pptx/doc/odt).
-                # ПДн внутри возможны, обезличить нечем → по политике не выпускаем.
+                # Формат, который не читает ни ядро, ни Open WebUI: обезличить
+                # нечем, а ПДн внутри возможны → по политике не выпускаем.
                 if self.valves.FAIL_CLOSED:
                     blocked.append(f"{filename} (формат не поддерживается обезличиванием)")
                 else:
                     kept_files.append(item)
+                continue
+            # Класс document: читаем байты файла целиком — ядро обезличивает
+            # сам документ (структуру, таблицы, колонтитулы).
+            raw, filename = await self._read_bytes(file_id)
+            if not raw:
                 continue
             if len(raw) > self.valves.MAX_FILE_MB * 1024 * 1024:
                 if self.valves.FAIL_CLOSED:
