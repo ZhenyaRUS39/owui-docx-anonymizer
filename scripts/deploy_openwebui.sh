@@ -21,6 +21,7 @@
 #   OWUI_URL=http://127.0.0.1:8080  адрес Open WebUI внутри хоста
 #   FILTER_ID=docx_anonymizer    id функции-фильтра
 #   SKIP_LIVE_CHECK=1            не гонять живую проверку в конце
+#   CORE_VERSION=v0.4.0          версия ядра upstream (не менять без проверки!)
 #   LIVE_SRC=<каталог>           каталог со скриптами живой проверки. Если они есть
 #                                (в скилле агента) — скрипт запустит проверку после
 #                                установки; если нет — проверка пропускается.
@@ -78,9 +79,21 @@ echo "контейнер: $OWUI_CONTAINER"
 say "1/6 ядро upstream и модель NER → $BASE"
 ssh_ha "set -e
 mkdir -p $BASE
+# Ядро берём на ТЕГЕ CORE_VERSION, а не с main: в v0.5.0 upstream поменял
+# API ядра (adapterForKind/parsePackage вместо parseDocx/serializeDocx),
+# и фильтр с ним не работает. Проверено: v0.4.0 — рабочая версия.
+CORE_VERSION="${CORE_VERSION:-v0.4.0}"
 if [ ! -d $BASE/repo/.git ]; then
   rm -rf $BASE/repo
-  git clone --depth 1 https://github.com/argmaster-dev/docx-anonymizer.git $BASE/repo
+  git clone --depth 1 --branch $CORE_VERSION https://github.com/argmaster-dev/docx-anonymizer.git $BASE/repo
+fi
+# Если репозиторий уже есть, но на другой версии — переключаем.
+if [ -d $BASE/repo/.git ]; then
+  HAVE=$(ssh_ha "cd $BASE/repo && git describe --tags --exact-match 2>/dev/null || git rev-parse --short HEAD" 2>/dev/null || echo unknown)
+  if [ "$HAVE" != "$CORE_VERSION" ]; then
+    echo "     ядро на $HAVE, переключаем на $CORE_VERSION"
+    ssh_ha "cd $BASE/repo && git fetch --depth 1 origin $CORE_VERSION && git checkout -q FETCH_HEAD"
+  fi
 fi
 if [ ! -d $BASE/repo/node_modules ]; then
   docker run --rm -v $BASE/repo:/w -w /w node:22-alpine sh -c 'npm ci --no-audit --no-fund'
@@ -94,6 +107,7 @@ if [ ! -f $BASE/ner/model.onnx ]; then
   test -f $BASE/ner/model.onnx || { echo 'МОДЕЛЬ НЕ СКАЧАЛАСЬ'; exit 1; }
 fi
 echo 'ядро и модель готовы'
+cat $BASE/repo/package.json | grep -m1 version
 ls $BASE/repo/node_modules | wc -l"
 
 # --- 2. сервис и обёртка ----------------------------------------------------
