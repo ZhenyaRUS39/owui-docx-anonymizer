@@ -33,9 +33,25 @@ const NER_DIR = process.env.DOCX_ANON_NER || '/srv/ner';
 const WRAPPER = process.env.DOCX_ANON_WRAPPER || join(SKILL_DIR, 'scripts', 'anonymize.mjs');
 const WORKDIR = process.env.DOCX_ANON_WORKDIR || '/srv/state';
 const PORT = Number(process.env.DOCX_ANON_PORT || 8971);
-const HOST = process.env.DOCX_ANON_HOST || '0.0.0.0';
+// По умолчанию — только localhost: сервис обрабатывает ПДн, и открывать его
+// в сеть без авторизации нельзя. Открытый адрес — осознанное решение
+// оператора (DOCX_ANON_HOST), но тогда обязателен DOCX_ANON_TOKEN.
+const HOST = process.env.DOCX_ANON_HOST || '127.0.0.1';
+// Токен доступа. Если задан — требуется в заголовке Authorization.
+// Если не задан, а сервис слушает не только localhost — сервис НЕ СТАРТУЕТ.
+const TOKEN = process.env.DOCX_ANON_TOKEN || '';
 const COMMERCIAL = process.env.DOCX_ANON_COMMERCIAL !== 'false';
 const MODE = process.env.DOCX_ANON_MODE || 'placeholder';
+
+if (HOST !== '127.0.0.1' && HOST !== 'localhost' && !TOKEN) {
+  console.error(
+    'ОТКАЗ ЗАПУСКА: сервис слушает ' + HOST + ' (не только localhost), ' +
+    'но DOCX_ANON_TOKEN не задан. Сервис обрабатывает персональные данные — ' +
+    'без токена его нельзя открывать в сеть. Задайте DOCX_ANON_TOKEN ' +
+    'или верните DOCX_ANON_HOST=127.0.0.1.'
+  );
+  process.exit(1);
+}
 
 function log(...a) {
   console.log(new Date().toISOString(), ...a);
@@ -185,6 +201,18 @@ function json(res, code, obj) {
 const server = createServer(async (req, res) => {
   try {
     const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
+
+    // Проверка токена — до любой обработки. /health оставляем открытым:
+    // он не содержит ПДн и нужен для проверки живости.
+    if (TOKEN && url.pathname !== '/health') {
+      const provided = String(req.headers['authorization'] || '')
+        .replace(/^Bearer\s+/i, '')
+        .trim();
+      if (provided !== TOKEN) {
+        log('auth failed:', req.method, url.pathname, 'from', req.socket.remoteAddress);
+        return json(res, 401, { error: 'UNAUTHORIZED' });
+      }
+    }
 
     if (req.method === 'GET' && url.pathname === '/health') {
       return json(res, 200, {

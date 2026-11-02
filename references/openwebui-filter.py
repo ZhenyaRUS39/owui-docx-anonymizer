@@ -104,6 +104,9 @@ class Filter:
         MAP_TTL_HOURS: int = 24
         # Как часто чистить (в inlet, не чаще раза в N секунд).
         CLEANUP_INTERVAL_SEC: int = 300
+        # Токен сервиса обезличивания. Обязателен, если сервис слушает
+        # не только localhost (DOCX_ANON_HOST != 127.0.0.1).
+        SERVICE_TOKEN: str = ""
 
     def __init__(self):
         self.valves = self.Valves()
@@ -272,11 +275,18 @@ class Filter:
                 raw = content.encode("utf-8")
         return raw, getattr(file, "filename", "") or ""
 
+    def _auth(self) -> dict:
+        # Заголовки для сервиса обезличивания. Токен обязателен, если сервис
+        # слушает не только localhost (DOCX_ANON_HOST).
+        token = (self.valves.SERVICE_TOKEN or "").strip()
+        return {"Authorization": "Bearer " + token} if token else {}
+
     def _anonymize(self, raw: bytes, filename: str):
         files = {"file": (filename or "document.bin", raw)}
         r = requests.post(
             self._service("/anonymize"),
             files=files,
+            headers=self._auth(),
             timeout=self.valves.TIMEOUT,
         )
         if r.status_code != 200:
@@ -287,6 +297,7 @@ class Filter:
         r = requests.post(
             self._service("/restore"),
             json={"text": text, "map": mapping},
+            headers=self._auth(),
             timeout=self.valves.TIMEOUT,
         )
         if r.status_code != 200:

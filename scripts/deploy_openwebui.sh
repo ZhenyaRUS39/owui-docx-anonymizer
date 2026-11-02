@@ -103,6 +103,9 @@ cat "$SKILL_DIR/references/anon_service.mjs" | ssh_ha "cat > $BASE/anon/anon_ser
 cat "$SKILL_DIR/scripts/anonymize.mjs" | ssh_ha "cat > $BASE/anon/scripts/anonymize.mjs"
 
 # --- 3. контейнер сервиса ---------------------------------------------------
+# Токен сервиса: сервис обрабатывает ПДн. Если его слушают не только на
+# localhost — токен обязателен (сервис сам не стартует без него).
+SERVICE_TOKEN="${SERVICE_TOKEN:-$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')}"
 say "3/6 контейнер $SERVICE_NAME"
 ssh_ha "docker rm -f $SERVICE_NAME 2>/dev/null || true
 docker run -d --name $SERVICE_NAME \
@@ -112,6 +115,7 @@ docker run -d --name $SERVICE_NAME \
   -e DOCX_ANON_REPO=/srv/repo -e DOCX_ANON_NER=/srv/ner \
   -e DOCX_ANON_WRAPPER=/srv/anon/scripts/anonymize.mjs \
   -e DOCX_ANON_WORKDIR=/srv/state -e DOCX_ANON_PORT=$PORT \
+  -e DOCX_ANON_TOKEN=$SERVICE_TOKEN -e DOCX_ANON_HOST=127.0.0.1 \
   -w /srv/anon node:22-alpine node /srv/anon/anon_service.mjs"
 sleep 5
 HEALTH=$(ssh_ha "curl -s -m 10 http://127.0.0.1:$PORT/health")
@@ -208,6 +212,14 @@ else
   echo "фильтр уже активен"
 fi
 owui_api_get "/api/v1/functions/id/$FILTER_ID" | python3 -c 'import json,sys; d=json.load(sys.stdin); print("active=", d.get("is_active"), "global=", d.get("is_global"), "type=", d.get("type"))'
+
+# Значения Valves: токен сервиса обезличивания. Без него фильтр не дойдёт
+# до сервиса (если тот слушает не только localhost).
+python3 -c "import json,sys;print(json.dumps({'SERVICE_TOKEN':sys.argv[1],'SERVICE_URL':sys.argv[2]}))" \
+  "$SERVICE_TOKEN" "http://127.0.0.1:$PORT" > /tmp/owui_valves.json
+cat /tmp/owui_valves.json | ssh_ha "cat > /tmp/owui_valves.json"
+rm -f /tmp/owui_valves.json
+ssh_ha "curl -s -o /dev/null -w 'valves: %{http_code}\n' -X POST -H 'Authorization: Bearer $API_KEY' -H 'Content-Type: application/json' --data-binary @/tmp/owui_valves.json $OWUI_URL/api/v1/functions/id/$FILTER_ID/valves/update"
 
 # --- ГОТОВО -----------------------------------------------------------------
 # Backend компилирует функцию и кэширует её на весь процесс: правка в БД
