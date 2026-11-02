@@ -18,7 +18,7 @@
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve, extname } from 'node:path';
-import { pathToFileURL } from 'node:url';
+import { pathToFileURL, fileURLToPath } from 'node:url';
 
 const argv = process.argv.slice(2);
 const arg = (name, def = undefined) => {
@@ -35,13 +35,24 @@ function die(msg, code = 2) {
   process.exit(code);
 }
 
+/** Рабочий каталог может быть удалён (тесты чистят временные каталоги
+ *  между кейсами) — тогда process.cwd() бросает ENOENT. Поэтому берём
+ *  каталог скрипта как безопасную базу. */
+function safeCwd() {
+  try {
+    return process.cwd();
+  } catch {
+    return dirname(fileURLToPath(import.meta.url));
+  }
+}
+
 /** Корень репозитория docx-anonymizer: --repo, переменная окружения или типовые места. */
 function findRepo() {
   const cand = arg('repo', process.env.DOCX_ANON_REPO);
   const list = [
     cand,
-    resolve(process.cwd(), 'docx-anonymizer'),
-    resolve(process.cwd(), '../docx-anonymizer'),
+    resolve(safeCwd(), 'docx-anonymizer'),
+    resolve(safeCwd(), '../docx-anonymizer'),
     '/opt/docx-anonymizer',
     '/srv/docx-anonymizer',
     join(process.env.HOME || '/root', 'docx-anonymizer'),
