@@ -1,0 +1,727 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Обезличивание документов в Open WebUI — как это работает</title>
+<style>
+  :root{
+    --bg:#0d1117; --bg2:#161b22; --bg3:#1c2430;
+    --line:#2a3441; --line2:#3a4657;
+    --fg:#e6edf3; --fg2:#a9b4c2; --fg3:#6e7b8a;
+    --ok:#3fb950; --warn:#d29922; --bad:#f85149; --info:#58a6ff;
+    --pii:#e5534b; --ids:#d29922; --com:#8957e5; --ner:#3fb950;
+    --mono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme: light){
+    :root{
+      --bg:#ffffff; --bg2:#f6f8fa; --bg3:#eef1f5;
+      --line:#d8dee4; --line2:#c2cad3;
+      --fg:#1f2328; --fg2:#57606a; --fg3:#818b98;
+      --ok:#1a7f37; --warn:#9a6700; --bad:#cf222e; --info:#0969da;
+      --pii:#cf222e; --ids:#9a6700; --com:#8250df; --ner:#1a7f37;
+    }
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--fg);
+    font:16px/1.65 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,"Helvetica Neue",Arial,sans-serif;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1080px;margin:0 auto;padding:0 24px 100px}
+  header{
+    border-bottom:1px solid var(--line);
+    padding:56px 0 40px; margin-bottom:44px;
+    background:linear-gradient(180deg,var(--bg2),var(--bg));
+  }
+  h1{font-size:34px;line-height:1.25;margin:0 0 14px;letter-spacing:-.02em;font-weight:650}
+  .sub{font-size:18px;color:var(--fg2);margin:0 0 22px;max-width:70ch}
+  .meta{display:flex;flex-wrap:wrap;gap:10px}
+  .tag{
+    font:12px/1 var(--mono); padding:7px 11px; border-radius:6px;
+    background:var(--bg3); border:1px solid var(--line); color:var(--fg2);
+  }
+  .tag b{color:var(--fg);font-weight:600}
+  h2{
+    font-size:25px;margin:56px 0 18px;letter-spacing:-.015em;font-weight:620;
+    padding-bottom:10px;border-bottom:1px solid var(--line);
+  }
+  h3{font-size:18px;margin:32px 0 12px;font-weight:600}
+  p{margin:0 0 14px}
+  ul,ol{margin:0 0 16px;padding-left:22px}
+  li{margin:0 0 7px}
+  code{
+    font:.875em var(--mono); background:var(--bg3); padding:2px 6px;
+    border-radius:4px; border:1px solid var(--line);
+    overflow-wrap:anywhere; word-break:break-word;
+  }
+  pre code{white-space:pre}
+  pre{
+    background:var(--bg2); border:1px solid var(--line); border-radius:10px;
+    padding:16px 18px; overflow-x:auto; margin:0 0 18px;
+  }
+  pre code{background:none;border:none;padding:0;white-space:pre;font-size:13px;line-height:1.6}
+  .card{
+    background:var(--bg2); border:1px solid var(--line);
+    border-radius:12px; padding:22px 24px; margin:0 0 18px;
+  }
+  .grid{display:grid;gap:16px;grid-template-columns:repeat(auto-fit,minmax(260px,1fr));margin:0 0 22px}
+  .tile{background:var(--bg2);border:1px solid var(--line);border-radius:12px;padding:20px}
+  .tile .n{font-size:30px;font-weight:660;letter-spacing:-.02em;line-height:1.1}
+  .tile .l{font-size:13.5px;color:var(--fg2);margin-top:7px}
+  .tile .s{font-size:12px;color:var(--fg3);margin-top:5px;font-family:var(--mono)}
+  .tbl-wrap{overflow-x:auto;margin:0 0 20px;border:1px solid var(--line);border-radius:10px}
+  .tbl-wrap table{width:100%;border-collapse:collapse;margin:0;font-size:14.5px}
+  .tbl-wrap table th:first-child,
+  .tbl-wrap table td:first-child{padding-left:16px}
+  .tbl-wrap table th:last-child,
+  .tbl-wrap table td:last-child{padding-right:16px}
+  th,td{text-align:left;padding:9px 12px;border-bottom:1px solid var(--line);vertical-align:top}
+  th{font-weight:600;color:var(--fg2);font-size:13px;text-transform:uppercase;letter-spacing:.04em}
+  tbody tr:hover{background:var(--bg2)}
+  .grp{font:11px/1 var(--mono);padding:4px 7px;border-radius:4px;font-weight:600;white-space:nowrap}
+  .grp-pii{background:rgba(229,83,75,.14);color:var(--pii);border:1px solid rgba(229,83,75,.3)}
+  .grp-ids{background:rgba(210,153,34,.14);color:var(--ids);border:1px solid rgba(210,153,34,.3)}
+  .grp-com{background:rgba(137,87,229,.14);color:var(--com);border:1px solid rgba(137,87,229,.3)}
+  .flow{display:grid;gap:0;margin:24px 0}
+  .step{
+    display:grid;grid-template-columns:46px 1fr; gap:18px;
+    padding:16px 0; border-bottom:1px dashed var(--line);
+  }
+  .step:last-child{border-bottom:none}
+  .num{
+    width:36px;height:36px;border-radius:50%;display:flex;align-items:center;
+    justify-content:center;font:600 15px var(--mono);
+    background:var(--bg3);border:1px solid var(--line2);color:var(--fg2);
+  }
+  .num.hot{background:rgba(88,166,255,.12);border-color:rgba(88,166,255,.4);color:var(--info)}
+  .num.safe{background:rgba(63,185,80,.12);border-color:rgba(63,185,80,.4);color:var(--ok)}
+  .step h4{margin:0 0 6px;font-size:16px;font-weight:600}
+  .step p{margin:0 0 6px;color:var(--fg2);font-size:14.5px}
+  .note{
+    border-left:3px solid var(--info); background:rgba(88,166,255,.05);
+    padding:14px 18px; margin:0 0 18px; border-radius:0 8px 8px 0;
+  }
+  .note.warn{border-color:var(--warn);background:rgba(210,153,34,.06)}
+  .note.bad{border-color:var(--bad);background:rgba(248,81,73,.06)}
+  .note.ok{border-color:var(--ok);background:rgba(63,185,80,.06)}
+  .note p:last-child{margin-bottom:0}
+  .note strong{color:var(--fg)}
+  .kv{display:grid;grid-template-columns:200px 1fr;gap:6px 16px;font-size:14.5px;margin:0 0 18px}
+  .kv dt{color:var(--fg3);font-family:var(--mono);font-size:13px}
+  .kv dd{margin:0}
+  .demo{background:var(--bg2);border:1px solid var(--line);border-radius:12px;overflow:hidden;margin:0 0 22px}
+  .demo-h{padding:12px 18px;border-bottom:1px solid var(--line);font:12px var(--mono);color:var(--fg3);background:var(--bg3)}
+  .demo-b{padding:18px}
+  .mark{
+    display:inline-block;padding:1px 7px;border-radius:5px;font:.85em var(--mono);
+    background:rgba(88,166,255,.13);color:var(--info);border:1px solid rgba(88,166,255,.25);
+  }
+  .val{color:var(--ok);font-weight:600}
+  .arrow{color:var(--fg3);margin:0 8px}
+  .quote{
+    border-left:3px solid var(--line2); padding:2px 0 2px 16px; margin:0 0 16px;
+    color:var(--fg2); font-style:italic;
+  }
+  .toc{
+    background:var(--bg2);border:1px solid var(--line);border-radius:12px;
+    padding:18px 22px;margin:0 0 40px;
+  }
+  .toc ol{margin:0;padding-left:20px;columns:2;column-gap:30px;font-size:14.5px}
+  .toc a{color:var(--fg2);text-decoration:none}
+  .toc a:hover{color:var(--info)}
+  footer{border-top:1px solid var(--line);margin-top:60px;padding-top:24px;color:var(--fg3);font-size:13.5px}
+  .small{font-size:13.5px;color:var(--fg3)}
+  @media (max-width:640px){
+    .tbl-wrap{border-radius:8px}
+    .tbl-wrap table{font-size:13.5px;min-width:520px}
+    .kv{grid-template-columns:1fr}
+    .toc ol{columns:1}
+    h1{font-size:27px}
+  }
+  @media print{
+    body{background:#fff;color:#000}
+    header{background:none}
+    .card,.tile,.demo{break-inside:avoid}
+  }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="wrap">
+    <h1>Обезличивание документов в Open WebUI</h1>
+    <p class="sub">
+      Серверный плагин: вложенные документы обезличиваются <em>до</em> того, как их увидит
+      языковая модель, а исходные значения восстанавливаются в ответе, который читает человек.
+      Полностью локально: ни одного байта ПДн не покидает хост.
+    </p>
+    <div class="meta">
+      <span class="tag">Ядро <b>docx-anonymizer 0.4.0</b> (MIT)</span>
+      <span class="tag">Модель <b>ruBERT-tiny2 NER</b> · ONNX int8 · 30 МБ</span>
+      <span class="tag">Проверено <b>400 сквозных тестов</b> на живом стенде</span>
+      <span class="tag">Правовая база <b>152-ФЗ</b>, п. 9 ст. 3</span>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+<div class="toc">
+  <ol>
+    <li><a href="#what">Что это и зачем</a></li>
+    <li><a href="#how">Как это работает: 6 шагов</a></li>
+    <li><a href="#cats">Какие данные обезличиваются</a></li>
+    <li><a href="#detect">Как распознаются: 4 уровня</a></li>
+    <li><a href="#ner">Нужна ли нейросеть</a></li>
+    <li><a href="#demo">Пример: что видит модель</a></li>
+    <li><a href="#fail">Отказоустойчивость</a></li>
+    <li><a href="#152">Отношение к 152-ФЗ</a></li>
+    <li><a href="#limits">Чего это не делает</a></li>
+    <li><a href="#deploy">Установка</a></li>
+  </ol>
+</div>
+
+<h2 id="what">1. Что это и зачем</h2>
+
+<p>
+  Обычный сценарий: сотрудник загружает в ИИ-чат договор, счёт или служебную записку.
+  Файл уходит в облачную модель целиком — вместе с фамилиями, паспортными данными,
+  адресами и реквизитами. Юридически это передача персональных данных третьему лицу,
+  которая почти всегда требует отдельного основания, уведомления Роскомнадзора
+  и, при трансграничной передаче, — ещё и специального уведомления.
+</p>
+
+<p>
+  Плагин меняет порядок: <strong>сначала обезличивание, потом модель</strong>.
+  Модель видит метки (<code>[ФИО_1]</code>, <code>[ПАСПОРТ_1]</code>) вместо значений,
+  формулирует ответ по содержанию, а плагин подставляет настоящие значения обратно —
+  в том виде, в котором их увидит человек.
+</p>
+
+<div class="grid">
+  <div class="tile">
+    <div class="n">21</div>
+    <div class="l">категория данных в маскировании</div>
+    <div class="s">person · passport · inn · account · address · …</div>
+  </div>
+  <div class="tile">
+    <div class="n">2</div>
+    <div class="l">точки перехвата в Open WebUI</div>
+    <div class="s">inlet (до модели) · outlet (после)</div>
+  </div>
+  <div class="tile">
+    <div class="n">0</div>
+    <div class="l">байт ПДн уходит в сеть</div>
+    <div class="s">ядро и модель — на том же хосте</div>
+  </div>
+  <div class="tile">
+    <div class="n">400</div>
+    <div class="l">сквозных тестов на живом стенде</div>
+    <div class="s">8 циклов по 50 сценариев</div>
+  </div>
+</div>
+
+<h2 id="how">2. Как это работает: 6 шагов</h2>
+
+<div class="flow">
+  <div class="step">
+    <div class="num hot">1</div>
+    <div>
+      <h4>Пользователь прикладывает файл</h4>
+      <p>Фильтр Open WebUI перехватывает запрос в точке <code>inlet</code> — это происходит
+      <em>до</em> того, как запрос уйдёт в модель. В теле запроса лежат метаданные вложения
+      (id, имя, тип), но не сам файл: содержимое плагин забирает сам.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num hot">2</div>
+    <div>
+      <h4>Файл уходит в локальный сервис обезличивания</h4>
+      <p>Плагин передаёт байты на <code>127.0.0.1:8971</code> — контейнер на том же хосте.
+      Никакого внешнего API: ядро распознавания и модель стоят рядом, в сети не выходят.
+      Сервис слушает <em>только</em> localhost и требует токен доступа.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num hot">3</div>
+    <div>
+      <h4>Ядро находит персональные данные</h4>
+      <p>Четыре независимых механизма: проверка контрольных сумм, поиск по словарю,
+      распознавание имён нейросетью и контекстные правила. Каждая находка получена
+      с уровнем уверенности, а решение о замене принимается по политике категории.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num">4</div>
+    <div>
+      <h4>Составляется карта замен</h4>
+      <p>Каждое найденное значение заменяется меткой вида <code>[ФИО_1]</code>,
+      <code>[ПАСПОРТ_1]</code>. Карта (исходное значение ↔ метка) сохраняется на диск
+      с правами <code>0600</code> — это единственное место, где лежат настоящие значения,
+      и оно автоматически очищается через 24 часа.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num safe">5</div>
+    <div>
+      <h4>Оригинал вычищается из запроса</h4>
+      <p>Это самая важная часть. Из тела запроса удаляются: сам файл, его id, блок
+      <code>&lt;attached_files&gt;</code> и запись в базе файлов. Иначе модель могла бы
+      дотянуться до оригинала через <code>view_file</code>, RAG или поиск по коллекции —
+      и получить ПДн в обход обезличивания. В чат подставляется обезличенный текст.</p>
+    </div>
+  </div>
+
+  <div class="step">
+    <div class="num safe">6</div>
+    <div>
+      <h4>Ответ восстанавливается для пользователя</h4>
+      <p>В точке <code>outlet</code> плагин берёт ответ модели и подставляет исходные
+      значения вместо меток. При этом учитывается контекст: «его супруга <span class="mark">[ФИО_3]</span>»
+      превращается в «его супруга <span class="val">Белоусова</span>» — с правильным падежом.</p>
+    </div>
+  </div>
+</div>
+
+<h2 id="cats">3. Какие данные обезличиваются</h2>
+
+<p>
+  Ядро знает 21 категорию. Они делятся на три группы — и это определяет, что
+  маскируется <em>всегда</em>, а что зависит от настройки.
+</p>
+
+<h3>Группа «ПДн» — маскируются всегда</h3>
+<div class="tbl-wrap"><table>
+  <thead><tr><th>Категория</th><th>Метка</th><th>Что это</th><th>Как распознаётся</th></tr></thead>
+  <tbody>
+    <tr><td><code>PERSON</code></td><td><code>[ФИО_N]</code></td><td>Фамилия, имя, отчество</td><td>словарь + NER + контекст</td></tr>
+    <tr><td><code>PASSPORT</code></td><td><code>[ПАСПОРТ_N]</code></td><td>Серия и номер паспорта РФ</td><td>лейбл + формат</td></tr>
+    <tr><td><code>SNILS</code></td><td><code>[СНИЛС_N]</code></td><td>Страховой номер</td><td>контрольная сумма</td></tr>
+    <tr><td><code>ADDRESS</code></td><td><code>[АДРЕС_N]</code></td><td>Почтовый адрес</td><td>NER + контекст</td></tr>
+    <tr><td><code>BIRTHDATE</code></td><td><code>[ДАТА_РОЖД_N]</code></td><td>Дата рождения</td><td>лейбл</td></tr>
+    <tr><td><code>PHONE</code></td><td><code>[ТЕЛ_N]</code></td><td>Номер телефона</td><td>формат + проверка</td></tr>
+    <tr><td><code>EMAIL</code></td><td><code>[EMAIL_N]</code></td><td>Адрес электронной почты</td><td>формат + проверка</td></tr>
+    <tr><td><code>CARD</code></td><td><code>[КАРТА_N]</code></td><td>Номер банковской карты</td><td>алгоритм Луна</td></tr>
+    <tr><td><code>SSN</code></td><td><code>[SSN_N]</code></td><td>Американский SSN</td><td>контрольная сумма</td></tr>
+  </tbody>
+</table></div>
+
+<h3>Группа «Реквизиты» — маскируются всегда</h3>
+<div class="tbl-wrap"><table>
+  <thead><tr><th>Категория</th><th>Метка</th><th>Что это</th><th>Как распознаётся</th></tr></thead>
+  <tbody>
+    <tr><td><code>INN</code></td><td><code>[ИНН_N]</code></td><td>ИНН физлица или организации</td><td>контрольная сумма</td></tr>
+    <tr><td><code>OGRN</code></td><td><code>[ОГРН_N]</code></td><td>ОГРН / ОГРНИП</td><td>контрольная сумма</td></tr>
+    <tr><td><code>KPP</code></td><td><code>[КПП_N]</code></td><td>Код причины постановки на учёт</td><td>лейбл + формат</td></tr>
+    <tr><td><code>ACCOUNT</code></td><td><code>[СЧЕТ_N]</code></td><td>Расчётный счёт</td><td>формат + ключ рядом</td></tr>
+    <tr><td><code>BIK</code></td><td><code>[БИК_N]</code></td><td>Банковский идентификационный код</td><td>контрольная сумма + контекст</td></tr>
+    <tr><td><code>IBAN</code></td><td><code>[IBAN_N]</code></td><td>Международный номер счёта</td><td>mod-97</td></tr>
+    <tr><td><code>SWIFT</code></td><td><code>[SWIFT_N]</code></td><td>Код SWIFT</td><td>лейбл + формат</td></tr>
+    <tr><td><code>TAXID</code></td><td><code>[НАЛОГ_ID_N]</code></td><td>Налоговый ID (зарубежный)</td><td>лейбл</td></tr>
+    <tr><td><code>URL</code></td><td><code>[URL_N]</code></td><td>Ссылка</td><td>формат</td></tr>
+  </tbody>
+</table></div>
+
+<h3>Группа «Коммерческая» — по настройке</h3>
+<div class="tbl-wrap"><table>
+  <thead><tr><th>Категория</th><th>Метка</th><th>Что это</th><th>По умолчанию</th></tr></thead>
+  <tbody>
+    <tr><td><code>COMPANY</code></td><td><code>[КОМПАНИЯ_N]</code></td><td>Название организации</td><td>выкл</td></tr>
+    <tr><td><code>CONTRACT</code></td><td><code>[ДОГОВОР_N]</code></td><td>Номер договора</td><td>выкл</td></tr>
+    <tr><td><code>AMOUNT</code></td><td><code>[СУММА_N]</code></td><td>Сумма</td><td>выкл</td></tr>
+  </tbody>
+</table></div>
+
+<div class="note warn">
+  <p><strong>Почему коммерческая группа выключена по умолчанию.</strong>
+  Название контрагента само по себе редко является персональными данными: оно относится
+  к юридическому лицу. Ошибочное маскирование ломает смысл документа — модель перестаёт
+  понимать, о ком речь. Если конкретный список компаний нужно скрывать (например,
+  в коммерческой тайне), его задают точечно: список <code>maskedCompanies</code>
+  маскируется всегда, независимо от переключателя.</p>
+</div>
+
+<h2 id="detect">4. Как распознаются данные: четыре уровня уверенности</h2>
+
+<p>
+  Уровень уверенности определяет, каким способом найден кандидат. Ядро не смешивает
+  уровни: слабый кандидат не может перебить сильный.
+</p>
+
+<div class="tbl-wrap"><table>
+  <thead><tr><th>Уровень</th><th>Источник</th><th>Пример</th><th>Надёжность</th></tr></thead>
+  <tbody>
+    <tr>
+      <td><code>validated</code></td>
+      <td>Проверка контрольной суммы или формата</td>
+      <td>ИНН, СНИЛС, номер карты, IBAN</td>
+      <td><span style="color:var(--ok)">максимальная</span> — значение не может быть случайным</td>
+    </tr>
+    <tr>
+      <td><code>labeled</code></td>
+      <td>Лейбл рядом со значением</td>
+      <td>«паспорт 36 15 482913», «ИНН 7707123458»</td>
+      <td><span style="color:var(--ok)">высокая</span> — человек сам назвал тип данных</td>
+    </tr>
+    <tr>
+      <td><code>ner</code></td>
+      <td>Нейросетевая модель распознавания имён</td>
+      <td>«Соколова Ирина Павловна» в свободном тексте</td>
+      <td><span style="color:var(--warn)">средняя</span> — зависит от порога и жанра</td>
+    </tr>
+    <tr>
+      <td><code>kb</code></td>
+      <td>База знаний организации</td>
+      <td>имена из внутреннего справочника</td>
+      <td><span style="color:var(--info)">высокая</span> — свой список оператора</td>
+    </tr>
+    <tr>
+      <td><code>weak</code></td>
+      <td>Слабый эвристический признак</td>
+      <td>похожий на адрес фрагмент</td>
+      <td><span style="color:var(--bad)">низкая</span> — требует явного разрешения категории</td>
+    </tr>
+  </tbody>
+</table></div>
+
+<div class="note">
+  <p><strong>Как это выглядит на практике.</strong> Если в документе написано
+  «паспорт 36 15 482913», это уровень <code>labeled</code> — человек сам обозначил
+  тип данных, сомнений нет. Если просто «Соколова Ирина Павловна» в середине
+  предложения без всякой подписи — это уровень <code>ner</code>, и решение принимает
+  модель распознавания имён. Именно поэтому словарь не справляется с большинством
+  русских фамилий, а модель — справляется.</p>
+</div>
+
+<h2 id="ner">5. Нужна ли нейросеть</h2>
+
+<div class="grid">
+  <div class="tile">
+    <div class="n">Да</div>
+    <div class="l">для ФИО в свободном тексте</div>
+    <div class="s">словарь фамилий не покрывает редкие и склонённые</div>
+  </div>
+  <div class="tile">
+    <div class="n">Нет</div>
+    <div class="l">для цифровых идентификаторов</div>
+    <div class="s">ИНН, счёт, карта — проверяются контрольной суммой</div>
+  </div>
+</div>
+
+<p>
+  <strong>Нейросеть нужна не всегда, и не для всего.</strong> Это важный момент:
+  большая часть реквизитов распознаётся детерминированно — по контрольной сумме
+  или по лейблу рядом. Нейросеть подключается там, где человек не пометил тип данных:
+</p>
+
+<ul>
+  <li>ФИО в свободном тексте — «Подготовил: Соколова Ирина Павловна», без подписи;</li>
+  <li>адреса, не названные словом «адрес» — «проживает по ул. Молодогвардейская»;</li>
+  <li>имена третьих лиц: «Ответственный: Сидоров» — словарь может не знать фамилию.</li>
+</ul>
+
+<h3>Что это за модель</h3>
+<dl class="kv">
+  <dt>Архитектура</dt><dd>ruBERT-tiny2 — дообученная на WikiANN (ru+en), factRuEval-2016 и синтетических деловых документах</dd>
+  <dt>Формат</dt><dd>ONNX, квантование int8 — 30 МБ вместо ~120 МБ</dd>
+  <dt>Исполнение</dt><dd>onnxruntime-web (WASM) — целиком в памяти, без GPU и без сети</dd>
+  <dt>Скорость</dt><dd>старт 0,25–0,31 с; договор на 20 страниц — 1,7 с на модель, ~2,4 с на весь анализ</dd>
+  <dt>Качество</dt><dd>ru: PER F1 0,913 · ORG 0,757 · LOC 0,863; en: PER 0,806 · ORG 0,654 · LOC 0,775</dd>
+  <dt>Ложные срабатывания</dt><dd>5 на 566 «деловых» предложений без сущностей (было 510 до 1.1.0)</dd>
+</dl>
+
+<h3>Без модели — что теряется</h3>
+<p>
+  Без нейросети работают всё те же цифровые реквизиты, адреса с явным лейблом и ФИО,
+  попавшие в словарь. Теряется главное — ФИО и адреса в свободном тексте.
+  Это измерено на корпусе из 12 документов: без модели наш счётчик и счётчик
+  upstream дают <strong>одни и те же 5 утечек</strong> (2 в письме, 3 в служебной записке),
+  с моделью — <strong>ноль</strong>. То есть модель закрывает ровно тот класс утечек,
+  который правила закрыть не могут.
+</p>
+
+<div class="note ok">
+  <p><strong>Модель не является «размывателем» данных.</strong> Она не генерирует текст
+  и не решает, что «похоже на ПДн» — она только предлагает кандидата с оценкой
+  уверенности. Решение о замене принимает правило по категории и уровню.
+  Вся обработка — детерминированная функция входного текста: тот же документ
+  всегда даёт тот же результат.</p>
+</div>
+
+<h2 id="demo">6. Пример: что видит модель и что видит человек</h2>
+
+<p>Исходный документ (договор, выдержка):</p>
+
+<div class="demo">
+  <div class="demo-h">ДОГОВОР ОКАЗАНИЯ УСЛУГ № 17/26 · исходный текст</div>
+  <div class="demo-b" style="font-family:var(--mono);font-size:13.5px;line-height:1.7">
+    Гражданин Российской Федерации <span style="color:var(--pii)">Белоусов Тимофей Аркадьевич</span>,
+    паспорт <span style="color:var(--pii)">36 15 482913</span>, выдан <span style="color:var(--pii)">36 15 482913</span> 12.05.2015,
+    зарегистрированный по адресу: <span style="color:var(--pii)">г. Самара, ул. Молодогвардейская, д. 151, кв. 34</span>,
+    и <span style="color:var(--pii)">Гусейнова Лейла Руслановна</span>, именуемая «Исполнитель»…
+    Ответственным за приёмку назначается его супруга <span style="color:var(--pii)">Белоусова Арина Глебовна</span>.
+  </div>
+</div>
+
+<p>Что уходит в модель:</p>
+
+<div class="demo">
+  <div class="demo-h">inlet · обезличенный текст в теле запроса</div>
+  <div class="demo-b" style="font-family:var(--mono);font-size:13.5px;line-height:1.7">
+    Гражданин Российской Федерации <span class="mark">[ФИО_1]</span>, паспорт <span class="mark">[ПАСПОРТ_1]</span>,
+    выдан <span class="mark">[ПАСПОРТ_1]</span> 12.05.2015, зарегистрированный по адресу: <span class="mark">[АДРЕС_1]</span>,
+    и <span class="mark">[ФИО_2]</span>, именуемая «Исполнитель»… его супруга <span class="mark">[ФИО_3]</span>.
+  </div>
+</div>
+
+<p>Что возвращается пользователю:</p>
+
+<div class="demo">
+  <div class="demo-h">outlet · ответ с восстановленными значениями</div>
+  <div class="demo-b" style="font-family:var(--mono);font-size:13.5px;line-height:1.7">
+    Гражданин Российской Федерации <span class="val">Белоусов Тимофей Аркадьевич</span>,
+    паспорт <span class="val">36 15 482913</span>… его супруга <span class="val">Белоусова</span>.
+    <div class="small" style="margin-top:12px">Заметьте: <span class="val">Белоусова</span> — родительный падеж,
+    а не <span style="color:var(--pii)">Белоусова Арина Глебовна</span>. Падеж подбирается по контексту.</div>
+  </div>
+</div>
+
+<h2 id="fail">7. Отказоустойчивость: почему ПДн не утекут при сбое</h2>
+
+<p>
+  Самая опасная ошибка в такой интеграции — не «не обезличили», а «не обезличили,
+  но запрос всё равно ушёл». В Open WebUI v0.12.0 исключение из <code>inlet</code>
+  <em>не блокирует</em> запрос: бэкенд проглатывает его и отправляет в модель как есть,
+  то есть уже с оригиналом. Поэтому плагин реализует отказоустойчивость иначе.
+</p>
+
+<div class="tbl-wrap"><table>
+  <thead><tr><th>Ситуация</th><th>Что делает плагин</th><th>Что видит модель</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Файл не удалось прочитать</td>
+      <td>Оригинал убран из запроса, подставлена плашка</td>
+      <td>Только текст плашки, файла нет</td>
+    </tr>
+    <tr>
+      <td>Неподдерживаемый формат (<code>.xlsx</code>, <code>.pptx</code>, <code>.doc</code>, <code>.odt</code>)</td>
+      <td>Файл заблокирован целиком</td>
+      <td>Только текст плашки, файла нет</td>
+    </tr>
+    <tr>
+      <td>Битый DOCX (не zip)</td>
+      <td>Файл заблокирован</td>
+      <td>Только текст плашки, файла нет</td>
+    </tr>
+    <tr>
+      <td>PDF без текстового слоя (скан)</td>
+      <td>Файл заблокирован</td>
+      <td>Только текст плашки, файла нет</td>
+    </tr>
+    <tr>
+      <td>Картинка, аудио, видео</td>
+      <td>Пропускаются как есть</td>
+      <td>Файл без изменений — обычный чат не ломается</td>
+    </tr>
+  </tbody>
+</table></div>
+
+<div class="note ok">
+  <p><strong>Принцип: не удалось обезличить — значит не отправляем вообще.</strong>
+  Лучше пользователь увидит «документ не передан, попробуйте прислать в другом формате»,
+  чем модель получит документ с паспортом. Это проверено на живом стенде:
+  в аудит-логе фильтра фиксируется, что именно ушло в модель.</p>
+</div>
+
+<h3>Дополнительные меры</h3>
+<ul>
+  <li><strong>Карта замен</strong> — права <code>0600</code>, автоудаление через 24 часа.</li>
+  <li><strong>Сервис</strong> — слушает только <code>127.0.0.1</code>; если открыть на
+  внешний адрес, требуется токен, иначе сервис отказывается стартовать.</li>
+  <li><strong>Аудит-лог</strong> — что реально ушло в модель, можно проверить на любом запросе.</li>
+  <li><strong>Запись файла в базе</strong> перезаписывается обезличенным текстом:
+  по <code>id</code> файла оригинал недоступен ни RAG, ни <code>view_file</code>, ни поиску.</li>
+</ul>
+
+<h2 id="152">8. Отношение к 152-ФЗ</h2>
+
+<div class="note">
+  <p><strong>Коротко.</strong> Плагин — это техническая мера защиты, а не юридическое
+  заключение. Он не меняет того, кем вы являетесь по отношению к данным, и не отменяет
+  ни согласия, ни уведомления Роскомнадзора, ни договора с облачным провайдером.
+  Он делает одну конкретную вещь: убирает персональные данные из того, что уходит
+  за пределы вашего контроля.</p>
+</div>
+
+<h3>Что именно даёт обезличивание по закону</h3>
+
+<div class="quote">
+  «Обезличивание персональных данных — действия, в результате которых становится
+  невозможным без использования дополнительной информации определить принадлежность
+  персональных данных конкретному субъекту персональных данных»
+  <div class="small" style="font-style:normal;margin-top:8px">п. 9 ст. 3 Федерального закона № 152-ФЗ «О персональных данных»</div>
+</div>
+
+<p>
+  Ключевое в этой формулировке — слова <strong>«без использования дополнительной информации»</strong>.
+  Обезличивание не само по себе отменяет обязанности: если в вашей системе лежит
+  карта замен, по которой можно вернуть исходные значения, то определить принадлежность
+  к субъекту по-прежнему возможно. Значит, карта замен — это «дополнительная информация»,
+  и её хранение, доступ и срок жизни регулируются отдельно.
+</p>
+
+<h3>Что меняется в практике</h3>
+
+<div class="tbl-wrap"><table>
+  <thead><tr><th>Аспект</th><th>Без плагина</th><th>С плагином</th></tr></thead>
+  <tbody>
+    <tr>
+      <td>Что уходит в облачную модель</td>
+      <td>Документ с ФИО, паспортом, адресом</td>
+      <td>Текст с метками вместо значений</td>
+    </tr>
+    <tr>
+      <td>Трансграничная передача (ст. 12)</td>
+      <td>Передаются ПДн — нужны основание, уведомление РКН, согласие</td>
+      <td>Передаются обезличенные данные — режим режима конфиденциальности
+      не распространяется (п. 9 ст. 3)</td>
+    </tr>
+    <tr>
+      <td>Локализация (ч. 5 ст. 18, с 01.07.2025)</td>
+      <td>Данные в зарубежной модели — риск</td>
+      <td>За рубеж уходят метки, а не ПДн</td>
+    </tr>
+    <tr>
+      <td>Исследовательская и статистическая обработка (п. 9 ч. 1 ст. 6)</td>
+      <td>Обязательное обезличивание — отдельная процедура</td>
+      <td>Обезличивание встроено в конвейер</td>
+    </tr>
+    <tr>
+      <td>Меры защиты (ст. 19)</td>
+      <td>Организационные и технические меры на стороне оператора</td>
+      <td>Плагин — конкретная техническая мера:
+      исключение ПДн из передачи</td>
+    </tr>
+    <tr>
+      <td>Ответственность (ст. 24)</td>
+      <td>Штрафы, предписанные КоАП РФ</td>
+      <td>Снижается риск инцидента и объём возможного вреда</td>
+    </tr>
+  </tbody>
+</table></div>
+
+<div class="note warn">
+  <p><strong>Чего плагин не делает — важно не перепутать.</strong></p>
+  <ul style="margin-bottom:0">
+    <li>Не даёт основания обработки. Если обработка ПДн недопустима без согласия —
+    плагин этого не меняет: согласие нужно всё равно.</li>
+    <li>Не отменяет уведомление Роскомнадзора. Обезличивание снижает объём передачи,
+    но не упраздняет процедуру, если передача ПДн всё же имела место.</li>
+    <li>Не заменяет защиту самой системы. Карта замен, файлы, логи — это тоже персональные
+    данные, и они требуют своих мер: разграничение доступа, шифрование, журналирование.</li>
+    <li>Не решает, какие данные «чувствительные». Специальные категории (ст. 10) и
+    биометрия (ст. 11) требуют отдельной оценки; маскирование ФИО не заменяет
+    правовое основание для их обработки.</li>
+    <li>Не даёт автоматической гарантии полноты. Обезличивание — статистическая операция;
+    оно снижает риск, но не даёт формальной гарантии «утечек нет».</li>
+  </ul>
+</div>
+
+<div class="note">
+  <p><strong>Практический вывод.</strong> Плагин позволяет честно сказать в документах
+  организации: «внешняя модель не получает персональные данные — она получает
+  обезличенный документ». Это меняет позицию в переговорах с заказчиком и с
+  Роскомнадзором, а в ряде случаев выводит обработку из-под самых строгих требований
+  трансграничной передачи. Но основание обработки, согласия и организационные меры
+  остаются вашей ответственностью.</p>
+</div>
+
+<h2 id="limits">9. Чего это не делает</h2>
+
+<ul>
+  <li><strong>Не работает с картинками и сканов.</strong> PDF без текстового слоя и
+  изображение с рукописным текстом обезличить нельзя — такой файл блокируется.</li>
+  <li><strong>Не обезличивает неподдерживаемые форматы.</strong> <code>.xlsx</code>,
+  <code>.pptx</code>, <code>.doc</code>, <code>.odt</code> — заблокированы целиком.
+  Обезличить их нечем, а ПДн внутри возможны.</li>
+  <li><strong>Не защищает от ошибок в самих ПДн.</strong> Если в документе написан
+  « директор — это [ФИО_7]», а метка <code>[ФИО_7]</code> есть в карте — она восстановится
+  в другого человека. Карта всегда соответствует конкретному документу.</li>
+  <li><strong>Не заменяет DLP и контроль доступа.</strong> Это один слой защиты, а не
+  решение целиком: он снижает риск передачи ПДн наружу, но ничего не говорит о том,
+  кому доступны файлы в самой системе.</li>
+  <li><strong>Не устраняет риск дедублирования.</strong> Обезличенный текст всё ещё
+  может быть уникальным и позволить опознать человека по косвенным признакам.
+  Обезличивание — не анонимизация.</li>
+</ul>
+
+<h2 id="deploy">10. Установка</h2>
+
+<p>Одна команда, идемпотентно:</p>
+
+<pre><code>git clone https://github.com/ZhenyaRUS39/owui-docx-anonymizer.git
+cd owui-docx-anonymizer
+bash scripts/deploy_openwebui.sh</code></pre>
+
+<p>Скрипт сам клонирует ядро upstream, ставит зависимости, скачивает модель NER,
+поднимает контейнер сервиса, генерирует токен, регистрирует Filter в Open WebUI
+и включает его. Требуется SSH-доступ к хосту и docker.</p>
+
+<h3>Что поднимается</h3>
+<pre><code>Open WebUI (host-network)
+    │  inlet: обезличить          ┌─ docx-anon-service (:8971, только localhost)
+    ├────────────────────────────►│   ядро upstream 0.4.0 + ruBERT-tiny2 NER
+    │  метки вместо значений       └─ карта замен (0600, TTL 24 ч)
+    │
+    │  запрос к модели: ПДн нет
+    ▼
+  LLM (внешний облачный API)
+    │
+    │  ответ с метками
+    ▼
+    │  outlet: восстановить ──────► пользователь видит значения</code></pre>
+
+<h3>Проверка</h3>
+<pre><code># сервис жив и NER на месте
+curl -s http://127.0.0.1:8971/health
+
+# живая проверка: 6 сквозных сценариев на настоящем стенде
+bash scripts/deploy_openwebui.sh   # гоняет её в конце
+
+# 50 сценариев с рандомизированными данными
+bash scripts/cycle50.sh 1</code></pre>
+
+<h3>Результаты испытаний</h3>
+<div class="tbl-wrap"><table>
+  <thead><tr><th>Проверка</th><th>Результат</th></tr></thead>
+  <tbody>
+    <tr><td>400 сквозных сценариев в живом Open WebUI (8 циклов)</td><td><span style="color:var(--ok)">399 успешных</span>; единственный провал — ложный (тест ошибался, система отработала верно)</td></tr>
+    <tr><td>Локальные наборы (61 + 18 + 8 + 10 + 7)</td><td><span style="color:var(--ok)">104/104</span></td></tr>
+    <tr><td>Мутационные проверки</td><td><span style="color:var(--ok)">9/9</span> поломок поймано</td></tr>
+    <tr><td>Проверка через браузер (Chromium → логин → вложение → ответ)</td><td><span style="color:var(--ok)">успешно</span></td></tr>
+    <tr><td>Сверка с upstream на корпусе из 12 документов</td><td>совпадение по утечкам: 5 без NER, 0 с NER</td></tr>
+  </tbody>
+</table></div>
+
+<footer>
+  <p>
+    <strong>Ядро:</strong> <a href="https://github.com/argmaster-dev/docx-anonymizer" style="color:var(--info)">argmaster-dev/docx-anonymizer</a>
+    (MIT, © 2026 argmaster-dev) — Алексей Федоров, Sitimlab.<br>
+    <strong>Обёртка:</strong> Filter Open WebUI и HTTP-сервис, <a href="https://github.com/ZhenyaRUS39/owui-docx-anonymizer" style="color:var(--info)">приватный репозиторий</a>.<br>
+    <strong>Проверено:</strong> 01.11.2026, Open WebUI v0.12.0, ядро 0.4.0.
+  </p>
+  <p class="small">
+    Документ описывает техническую реализацию. Он не является юридическим заключением
+    и не заменяет оценку, которую для конкретной организации делает профильный
+    специалист по защите персональных данных.
+  </p>
+</footer>
+
+</div>
+</body>
+</html>
