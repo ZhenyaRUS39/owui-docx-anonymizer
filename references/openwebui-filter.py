@@ -49,7 +49,7 @@ import requests
 # (routers/functions.py:510) и пересоздаёт self.valves перед каждым вызовом
 # (utils/plugin.py:64-70). Обычный класс без .schema() ломает всю функцию:
 # AttributeError проглатывается, и inlet не отрабатывает вовсе.
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 # Блок <attached_files> добавляет backend ДО inlet (middleware.py:2369 →
 # add_file_context). В нём id файла, по которому модель может вызвать
@@ -107,6 +107,27 @@ class Filter:
         # Токен сервиса обезличивания. Обязателен, если сервис слушает
         # не только localhost (DOCX_ANON_HOST != 127.0.0.1).
         SERVICE_TOKEN: str = ""
+        # Группа «Коммерческая информация» (названия компаний, товарные знаки
+        # и часть реквизитов юрлиц).
+        #   «Включено» — маскировать коммерческие данные (то же, что
+        #     --commercial в ядре; по умолчанию сервис работает в этом режиме);
+        #   «Выключено» — не маскировать: в документе останутся названия
+        #     компаний. Персональные данные (pii/ids) маскируются ВСЕГДА —
+        #     настройка на них не влияет.
+        #   «Как в сервисе» — взять настройку сервиса (DOCX_ANON_COMMERCIAL).
+        COMMERCIAL: str = Field(
+            default="Как в сервисе",
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "Включено", "label": "Коммерческая: включено"},
+                        {"value": "Выключено", "label": "Коммерческая: выключено"},
+                        {"value": "Как в сервисе", "label": "Коммерческая: как в сервисе"},
+                    ],
+                }
+            },
+        )
 
     def __init__(self):
         self.valves = self.Valves()
@@ -181,14 +202,13 @@ class Filter:
     # Классификация вложений — три класса:
     #   MEDIA      — картинки/аудио/видео: пропускаем как есть (текстовых ПДн нет)
     #   DOCUMENT   — форматы, которые ядро обезличивает: обезличиваем
-    #   EXTRACTED  — форматы, которые не читает ядро (xlsx/pptx/odt/doc):
-    #                сервис извлекает из них текст, мы обезличиваем этот текст
+    #   EXTRACTED  — форматы, которые читает Open WebUI, но не ядро (xlsx/pptx/
+    #                odt/doc): обезличиваем извлечённый текст
     #   UNSUPPORTED— форматы, которые не читает никто: БЛОКИРУЕМ, потому что
     #                обезличить нечем, а ПДн внутри вполне могут быть.
     DOC_EXTS = {".docx", ".docm", ".pdf", ".txt", ".md", ".text"}
-    # Форматы, которые ядро обезличивания не читает (xlsx/pptx/odt/doc).
-    # Их текст извлекает сервис (references/office_extract.mjs), а если не смог —
-    # Open WebUI извлекает в
+    # Форматы, которые Open WebUI умеет разбирать сам (xlsx/pptx/odt/doc), но
+    # которые ядро обезличивания не читает. Их текст Open WebUI извлекает в
     # files.data['content'] — обезличиваем именно его (как обычный текст).
     EXTRACTED_EXTS = {".xlsx", ".xls", ".xlsm", ".pptx", ".pptm", ".odt", ".ods", ".odp", ".doc"}
     MEDIA_EXTS = {
@@ -321,11 +341,55 @@ class Filter:
         token = (self.valves.SERVICE_TOKEN or "").strip()
         return {"Authorization": "Bearer " + token} if token else {}
 
+    def _log_error(self, filename, exc):
+        """Трассировка ошибки обезличивания (для разбора сбоев).
+
+        Включается переменной DOCX_ANON_ERROR_LOG=1 — по умолчанию молчим,
+        чтобы не писать лишние файлы в проде.
+        """
+        if os.environ.get("DOCX_ANON_ERROR_LOG") not in ("1", "true", "yes"):
+            return
+        try:
+            import traceback
+            path = os.environ.get("DOCX_ANON_ERROR_LOG_PATH",
+                                  "/tmp/docx-anon/error.log")
+            os.makedirs(os.path.dirname(path), exist_ok=True)
+            with open(path, "a", encoding="utf-8") as f:
+                f.write(f"=== {filename} ===\n")
+                f.write(traceback.format_exc())
+                f.write("\n")
+        except Exception:
+            pass
+
+    def _commercial_flag(self):
+        """Значение COMMERCIAL → True / False / None(=настройка сервиса).
+
+        Принимаем подписи из интерфейса («Включено»/«Выключено»/«Как в
+        сервисе») и технические значения (1/0/true/false/on/off/да/нет/вкл/выкл).
+        Неизвестное значение — None: не ломаем обезличивание из-за опечатки
+        в настройке (сервис возьмёт своё значение по умолчанию).
+        """
+        raw = str(getattr(self.valves, "COMMERCIAL", "Как в сервисе")).strip().lower()
+        if raw in ("", "default", "как в сервисе", "настройка сервиса"):
+            return None
+        if raw in ("включено", "1", "true", "on", "yes", "да", "вкл",
+                   "enable", "enabled"):
+            return True
+        if raw in ("выключено", "0", "false", "off", "no", "нет", "выкл",
+                   "disable", "disabled"):
+            return False
+        return None
+
     def _anonymize(self, raw: bytes, filename: str):
         files = {"file": (filename or "document.bin", raw)}
+        params = {}
+        commercial = self._commercial_flag()
+        if commercial is not None:
+            params["commercial"] = "1" if commercial else "0"
         r = requests.post(
             self._service("/anonymize"),
             files=files,
+            params=params,
             headers=self._auth(),
             timeout=self.valves.TIMEOUT,
         )
@@ -457,7 +521,7 @@ class Filter:
                 await self._scrub_file_record(file_id, anon_text)
                 continue
             if kind == "unsupported":
-                # Формат, который не читает ни ядро, ни сервис: обезличить
+                # Формат, который не читает ни ядро, ни Open WebUI: обезличить
                 # нечем, а ПДн внутри возможны → по политике не выпускаем.
                 if self.valves.FAIL_CLOSED:
                     blocked.append(f"{filename} (формат не поддерживается обезличиванием)")
@@ -478,6 +542,7 @@ class Filter:
             try:
                 res = self._anonymize(raw, filename)
             except Exception as e:
+                self._log_error(filename, e)
                 if self.valves.FAIL_CLOSED:
                     blocked.append(f"{filename} ({str(e)[:120]})")
                 else:

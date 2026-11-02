@@ -233,11 +233,50 @@ owui_api_get "/api/v1/functions/id/$FILTER_ID" | python3 -c 'import json,sys; d=
 
 # Значения Valves: токен сервиса обезличивания. Без него фильтр не дойдёт
 # до сервиса (если тот слушает не только localhost).
-python3 -c "import json,sys;print(json.dumps({'SERVICE_TOKEN':sys.argv[1],'SERVICE_URL':sys.argv[2]}))" \
-  "$SERVICE_TOKEN" "http://127.0.0.1:$PORT" > /tmp/owui_valves.json
+# COMMERCIAL — группа «Коммерческая информация»: «Включено»/«Выключено»/
+# «Как в сервисе» (взять настройку сервиса).
+#
+# ВАЖНО: /valves/update ЗАМЕНЯЕТ объект целиком, а не мержит. Поэтому сначала
+# читаем текущие значения (их выставил оператор через интерфейс) и мержим с
+# ними — иначе деплой затирал бы выбор оператора и любые другие поля.
+COMMERCIAL="${COMMERCIAL:-}"
+
+# 1) Текущие значения — из API (то же, что видит интерфейс).
+CURRENT=$(ssh_ha "curl -s -H 'Authorization: Bearer $API_KEY' $OWUI_URL/api/v1/functions/id/$FILTER_ID/valves" 2>/dev/null || echo '{}')
+
+# 2) Мержим: обязательные поля перезаписываем, COMMERCIAL — только если
+#    переменная окружения задана, остальное сохраняем.
+python3 - "$SERVICE_TOKEN" "http://127.0.0.1:$PORT" "$COMMERCIAL" "$CURRENT" <<'PY' > /tmp/owui_valves.json
+import json, sys
+
+token, url, commercial, current = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+try:
+    valves = json.loads(current) or {}
+    if not isinstance(valves, dict):
+        valves = {}
+except Exception:
+    valves = {}
+
+valves["SERVICE_TOKEN"] = token
+valves["SERVICE_URL"] = url
+if commercial:
+    valves["COMMERCIAL"] = commercial
+
+print(json.dumps(valves, ensure_ascii=False))
+PY
 cat /tmp/owui_valves.json | ssh_ha "cat > /tmp/owui_valves.json"
 rm -f /tmp/owui_valves.json
-ssh_ha "curl -s -o /dev/null -w 'valves: %{http_code}\n' -X POST -H 'Authorization: Bearer $API_KEY' -H 'Content-Type: application/json' --data-binary @/tmp/owui_valves.json $OWUI_URL/api/v1/functions/id/$FILTER_ID/valves/update"
+
+# 3) Обновляем. Ключ только что вставлен в SQLite из другого процесса
+#    (docker exec), и сервер может увидеть его не сразу (WAL) — пробуем
+#    несколько раз, а не один (иначе шаг падал с 401).
+VALVES_CODE=""
+for _ in 1 2 3 4 5 6; do
+  VALVES_CODE=$(ssh_ha "curl -s -o /dev/null -w '%{http_code}' -X POST -H 'Authorization: Bearer $API_KEY' -H 'Content-Type: application/json' --data-binary @/tmp/owui_valves.json $OWUI_URL/api/v1/functions/id/$FILTER_ID/valves/update" 2>/dev/null)
+  [ "$VALVES_CODE" = "200" ] && break
+  sleep 2
+done
+echo "valves: ${VALVES_CODE:-нет-ответа}"
 
 # --- ГОТОВО -----------------------------------------------------------------
 # Backend компилирует функцию и кэширует её на весь процесс: правка в БД

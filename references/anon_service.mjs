@@ -135,7 +135,9 @@ async function docxText(bytes) {
 }
 
 // --- основная операция ---
-async function anonymizeBuffer(bytes, filename) {
+// commercial: переопределение режима «Коммерческая информация» для этого
+// запроса. undefined — берётся DOCX_ANON_COMMERCIAL из окружения.
+async function anonymizeBuffer(bytes, filename, commercial = undefined) {
   const ext = (extname(filename || '') || '.docx').toLowerCase();
   const tmp = await mkdtemp();
   const inPath = join(tmp, `in${ext}`);
@@ -144,7 +146,8 @@ async function anonymizeBuffer(bytes, filename) {
   await writeFile(inPath, bytes);
 
   const args = ['--in', inPath, '--out', outPath, '--map', mapPath, '--json', '--mode', MODE];
-  if (COMMERCIAL) args.push('--commercial');
+  const useCommercial = commercial === undefined ? COMMERCIAL : !!commercial;
+  if (useCommercial) args.push('--commercial');
   if (NER_DIR && existsSync(NER_DIR)) args.push('--ner', NER_DIR);
 
   const r = await runWrapper(args);
@@ -237,8 +240,23 @@ const server = createServer(async (req, res) => {
       const parts = parseMultipart(body, m[1] || m[2]);
       const file = parts.find((p) => p.name === 'file') || parts[0];
       if (!file || !file.data.length) return json(res, 400, { error: 'NO_FILE' });
+      // Режим «Коммерческая информация» можно переопределить на каждый запрос:
+      //   ?commercial=1 / ?commercial=0 — из query;
+      //   поле commercial=1/0 в multipart — из тела.
+      // Если не задан — берётся DOCX_ANON_COMMERCIAL из окружения сервиса.
+      let commercial;
+      const q = url.searchParams.get('commercial');
+      if (q !== null && q !== '') {
+        commercial = q === '1' || q.toLowerCase() === 'true';
+      } else {
+        const field = parts.find((p) => p.name === 'commercial');
+        if (field) {
+          commercial = field.data.toString('utf-8').trim() === '1'
+            || field.data.toString('utf-8').trim().toLowerCase() === 'true';
+        }
+      }
       try {
-        const r = await anonymizeBuffer(file.data, file.filename);
+        const r = await anonymizeBuffer(file.data, file.filename, commercial);
         if (!r.text || !r.text.trim()) {
           return json(res, 422, { error: 'EMPTY_TEXT', detail: 'не удалось извлечь текст' });
         }
