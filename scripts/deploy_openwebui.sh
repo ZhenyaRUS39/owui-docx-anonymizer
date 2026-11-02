@@ -239,17 +239,53 @@ owui_api_get "/api/v1/functions/id/$FILTER_ID" | python3 -c 'import json,sys; d=
 # ВАЖНО: /valves/update ЗАМЕНЯЕТ объект целиком, а не мержит. Поэтому сначала
 # читаем текущие значения (их выставил оператор через интерфейс) и мержим с
 # ними — иначе деплой затирал бы выбор оператора и любые другие поля.
+# Переключатели фильтра. Любой из них можно задать переменной окружения;
+# если переменная не задана — значение оператора (из интерфейса)
+# сохраняется. Пустое значение означает «не задавать».
+#
+#   COMMERCIAL           — «Включено»/«Выключено»/«Как в сервисе»
+#   MODE                 — «Метки»/«Звёздочки»/«Удалить»/«Как в сервисе»
+#   NER_ENABLED          — «Включено»/«Выключено»/«Как в сервисе»
+#   NER_THRESHOLD        — «0.5»/«0.7»/«0.85»/«0.95»/«Как в сервисе»
+#   GOV_ENTITIES         — «Не трогать»/«Маскировать»/«Как в сервисе»
+#   DICT_NAMES           — «Включено»/«Выключено»/«Как в сервисе»
+#   KEEP_METADATA        — «Оставлять»/«Вычищать»/«Как в сервисе»
+#   STRIP_EMBEDDED       — «Вырезать»/«Оставлять»/«Как в сервисе»
+#   PLACEHOLDER_LANGUAGE — «ru»/«en»/«Как в документе»/«Как в сервисе»
+#   LANGUAGE             — «ru»/«en»/«both»/«Как в документе»/«Как в сервисе»
+#
+# ВАЖНО: /valves/update ЗАМЕНЯЕТ объект целиком, а не мержит. Поэтому сначала
+# читаем текущие значения (их выставил оператор через интерфейс) и мержим с
+# ними — иначе деплой затирал бы выбор оператора и любые другие поля.
 COMMERCIAL="${COMMERCIAL:-}"
+MODE="${MODE:-}"
+NER_ENABLED="${NER_ENABLED:-}"
+NER_THRESHOLD="${NER_THRESHOLD:-}"
+GOV_ENTITIES="${GOV_ENTITIES:-}"
+DICT_NAMES="${DICT_NAMES:-}"
+KEEP_METADATA="${KEEP_METADATA:-}"
+STRIP_EMBEDDED="${STRIP_EMBEDDED:-}"
+PLACEHOLDER_LANGUAGE="${PLACEHOLDER_LANGUAGE:-}"
+LANGUAGE="${LANGUAGE:-}"
 
 # 1) Текущие значения — из API (то же, что видит интерфейс).
 CURRENT=$(ssh_ha "curl -s -H 'Authorization: Bearer $API_KEY' $OWUI_URL/api/v1/functions/id/$FILTER_ID/valves" 2>/dev/null || echo '{}')
 
-# 2) Мержим: обязательные поля перезаписываем, COMMERCIAL — только если
-#    переменная окружения задана, остальное сохраняем.
-python3 - "$SERVICE_TOKEN" "http://127.0.0.1:$PORT" "$COMMERCIAL" "$CURRENT" <<'PY' > /tmp/owui_valves.json
+# 2) Мержим: обязательные поля перезаписываем, переключатели — только если
+#    соответствующая переменная окружения задана, остальное сохраняем.
+python3 - "$SERVICE_TOKEN" "http://127.0.0.1:$PORT" "$CURRENT" \
+    "$COMMERCIAL" "$MODE" "$NER_ENABLED" "$NER_THRESHOLD" "$GOV_ENTITIES" \
+    "$DICT_NAMES" "$KEEP_METADATA" "$STRIP_EMBEDDED" \
+    "$PLACEHOLDER_LANGUAGE" "$LANGUAGE" <<'PY' > /tmp/owui_valves.json
 import json, sys
 
-token, url, commercial, current = sys.argv[1], sys.argv[2], sys.argv[3], sys.argv[4]
+token, url, current = sys.argv[1], sys.argv[2], sys.argv[3]
+switches = dict(zip(
+    ["COMMERCIAL", "MODE", "NER_ENABLED", "NER_THRESHOLD", "GOV_ENTITIES",
+     "DICT_NAMES", "KEEP_METADATA", "STRIP_EMBEDDED",
+     "PLACEHOLDER_LANGUAGE", "LANGUAGE"],
+    sys.argv[4:]))
+
 try:
     valves = json.loads(current) or {}
     if not isinstance(valves, dict):
@@ -259,8 +295,10 @@ except Exception:
 
 valves["SERVICE_TOKEN"] = token
 valves["SERVICE_URL"] = url
-if commercial:
-    valves["COMMERCIAL"] = commercial
+
+for name, value in switches.items():
+    if value:
+        valves[name] = value
 
 print(json.dumps(valves, ensure_ascii=False))
 PY

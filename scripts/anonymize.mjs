@@ -30,6 +30,31 @@ const arg = (name, def = undefined) => {
 };
 const flag = (name) => argv.includes(name);
 
+/**
+ * Булев флаг трёх состояний: переключатель может быть включён, выключен
+ * или не задан (тогда берётся значение по умолчанию).
+ *
+ * Поддерживаются формы: --flag, --flag=true/false, --flag 0/1,
+ * --no-flag (инверсия), --flag true/false (значение отдельным аргументом).
+ *
+ * Раньше проверка была `arg('--x') === false`, но arg() возвращает строку
+ * "false" для "--x false" и true для "--x" — то есть выключение никогда не
+ * срабатывало, и настройка молча оставалась включённой.
+ */
+function boolFlag(name) {
+  const plain = name.startsWith('--') ? name : `--${name}`;
+  const neg = plain.startsWith('--no-') ? plain : `--no-${plain.replace(/^--/, '')}`;
+  if (argv.includes(neg)) return false;
+  const i = argv.indexOf(plain);
+  if (i === -1) return undefined;
+  const raw = argv[i + 1];
+  if (raw === undefined || raw.startsWith('--')) return true;
+  const v = String(raw).trim().toLowerCase();
+  if (v === 'false' || v === '0' || v === 'no' || v === 'off' || v === 'нет') return false;
+  if (v === 'true' || v === '1' || v === 'yes' || v === 'on' || v === 'да') return true;
+  return true;
+}
+
 function die(msg, code = 2) {
   process.stderr.write(`anonymize: ${msg}\n`);
   process.exit(code);
@@ -87,19 +112,51 @@ const {
 /** Настройки поверх defaultSettings() — те же поля, что и в расширении. */
 function buildSettings() {
   const s = { ...defaultSettings() };
-  if (flag('--commercial')) s.commercial = true;
+
+  // --- Коммерческая информация (группа commercial) ---
+  const commercial = boolFlag('--commercial');
+  if (commercial !== undefined) s.commercial = commercial;
+
+  // --- Режим замены: placeholder | mask | delete ---
   if (arg('--mode')) s.mode = String(arg('--mode'));
+  const modeOff = boolFlag('--mode-off');
+  if (modeOff === true) s.mode = 'delete';
+
+  // --- Языки ---
   if (arg('--language')) s.language = String(arg('--language'));
   if (arg('--placeholder-language')) s.placeholderLanguage = String(arg('--placeholder-language'));
+
+  // --- Размер файла ---
   if (arg('--max-file-size-mb')) s.maxFileSizeMB = Number(arg('--max-file-size-mb'));
-  if (flag('--no-metadata')) s.keepMetadata = true; // keepMetadata=true оставляет метаданные; по умолчанию они вычищаются
-  if (flag('--strip-embedded')) s.stripEmbedded = true;
-  if (flag('--no-ner')) s.nerEnabled = false;
+
+  // --- Метаданные и встроенные объекты ---
+  // keepMetadata=true оставляет метаданные docProps; по умолчанию они вычищаются.
+  // Флаг --keep-metadata включает оставление, --no-metadata выключает.
+  const keepMeta = boolFlag('--keep-metadata');
+  if (keepMeta !== undefined) s.keepMetadata = keepMeta;
+  // stripEmbedded=true вырезает встроенные OLE-объекты (они не обезличиваются).
+  const stripEmb = boolFlag('--strip-embedded');
+  if (stripEmb !== undefined) s.stripEmbedded = stripEmb;
+
+  // --- Нейросеть (NER) ---
+  const ner = boolFlag('--ner');
+  if (ner !== undefined) s.nerEnabled = ner;
+  const noNer = boolFlag('--no-ner');
+  if (noNer === true) s.nerEnabled = false;
   if (arg('--ner-threshold')) s.nerThreshold = Number(arg('--ner-threshold'));
   if (arg('--ner-threshold-org')) s.nerThresholdOrg = Number(arg('--ner-threshold-org'));
-  if (arg('--dict-names') === false) s.dictNames = false;
-  if (arg('--gov-entities') === false) s.govEntities = false;
-  if (arg('--ner-stoplist')) s.nerStoplist = String(arg('--ner-stoplist')).split(',').map((s) => s.trim()).filter(Boolean);
+  if (arg('--ner-stoplist')) s.nerStoplist = String(arg('--ner-stoplist')).split(',').map((x) => x.trim()).filter(Boolean);
+
+  // --- Детекторы ---
+  // govEntities=true — не трогать госорганы и банки из списка;
+  // govEntities=false — маскировать и их тоже.
+  const gov = boolFlag('--gov-entities');
+  if (gov !== undefined) s.govEntities = gov;
+  // dictNames=true — словарный детектор ФИО третьих лиц (уточняет леммы по
+  // большому словарю); false — только модель и правила.
+  const dict = boolFlag('--dict-names');
+  if (dict !== undefined) s.dictNames = dict;
+
   return s;
 }
 

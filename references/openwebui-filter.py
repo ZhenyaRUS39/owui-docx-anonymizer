@@ -129,6 +129,165 @@ class Filter:
             },
         )
 
+        # ── Режим замены ПДн ──────────────────────────────────────────────
+        #   «Метки»   — [ФИО_1], [ПАСПОРТ_1]: значения можно восстановить;
+        #   «Звёздочки»— XXXXXX XXXX: значение не восстановить, но видно, что
+        #                было что-то заменено;
+        #   «Удалить» — [удалено]: значение удалено полностью.
+        #   «Как в сервисе» — DOCX_ANON_MODE.
+        MODE: str = Field(
+            default="Как в сервисе",
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "Метки", "label": "Режим: метки ([ФИО_1])"},
+                        {"value": "Звёздочки", "label": "Режим: звёздочки (XXXXXX)"},
+                        {"value": "Удалить", "label": "Режим: удалить ([удалено])"},
+                        {"value": "Как в сервисе", "label": "Режим: как в сервисе"},
+                    ],
+                }
+            },
+        )
+
+        # ── Нейросеть (NER) ───────────────────────────────────────────────
+        # Модель распознаёт ФИО и организации, которых нет в словарях и
+        # правилах. Выключение ускоряет обработку, но часть имён останется
+        # незамаскированной.
+        NER_ENABLED: str = Field(
+            default="Как в сервисе",
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "Включено", "label": "Нейросеть: включено"},
+                        {"value": "Выключено", "label": "Нейросеть: выключено"},
+                        {"value": "Как в сервисе", "label": "Нейросеть: как в сервисе"},
+                    ],
+                }
+            },
+        )
+
+        # Порог уверенности нейросети (0..1). Ниже — больше имён находится,
+        # но выше риск ложных срабатываний. 0.7 — значение ядра по умолчанию.
+        NER_THRESHOLD: str = Field(
+            default="Как в сервисе",
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "Как в сервисе", "label": "Порог нейросети: как в сервисе"},
+                        {"value": "0.5", "label": "Порог нейросети: 0.5 (строже)"},
+                        {"value": "0.7", "label": "Порог нейросети: 0.7 (по умолчанию)"},
+                        {"value": "0.85", "label": "Порог нейросети: 0.85 (мягче)"},
+                        {"value": "0.95", "label": "Порог нейросети: 0.95 (мягче всего)"},
+                    ],
+                }
+            },
+        )
+
+        # ── Детекторы ─────────────────────────────────────────────────────
+        # Госорганы: «Не трогать» — ФНС, МВД, Сбербанк и прочие из списка
+        # ядра остаются как есть; «Маскировать» — маскируются наравне с
+        # остальными организациями.
+        GOV_ENTITIES: str = Field(
+            default="Как в сервисе",
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "Не трогать", "label": "Госорганы: не трогать"},
+                        {"value": "Маскировать", "label": "Госорганы: маскировать"},
+                        {"value": "Как в сервисе", "label": "Госорганы: как в сервисе"},
+                    ],
+                }
+            },
+        )
+
+        # Словарь имён: уточняет ФИО по большому словарю (уменьшает ложные
+        # срабатывания на названиях компаний и наоборот).
+        DICT_NAMES: str = Field(
+            default="Как в сервисе",
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "Включено", "label": "Словарь имён: включено"},
+                        {"value": "Выключено", "label": "Словарь имён: выключено"},
+                        {"value": "Как в сервисе", "label": "Словарь имён: как в сервисе"},
+                    ],
+                }
+            },
+        )
+
+        # ── Метаданные и встроенные объекты ───────────────────────────────
+        # Метаданные DOCX (автор, компания, время правки) могут содержать ПДн.
+        # По умолчанию ядро их вычищает.
+        KEEP_METADATA: str = Field(
+            default="Как в сервисе",
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "Вычищать", "label": "Метаданные: вычищать (безопасно)"},
+                        {"value": "Оставлять", "label": "Метаданные: оставлять"},
+                        {"value": "Как в сервисе", "label": "Метаданные: как в сервисе"},
+                    ],
+                }
+            },
+        )
+
+        # Встроенные объекты (OLE-вложения, диаграммы) ядро не обезличивает —
+        # при включении оно вырезает их из файла.
+        STRIP_EMBEDDED: str = Field(
+            default="Как в сервисе",
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "Вырезать", "label": "Встроенные объекты: вырезать"},
+                        {"value": "Оставлять", "label": "Встроенные объекты: оставлять"},
+                        {"value": "Как в сервисе", "label": "Встроенные объекты: как в сервисе"},
+                    ],
+                }
+            },
+        )
+
+        # ── Языки ──────────────────────────────────────────────────────────
+        # Язык меток: [ФИО_1] (по-русски) или [PERSON_1] (по-английски).
+        # «Как в документе» — язык берётся из самого документа.
+        PLACEHOLDER_LANGUAGE: str = Field(
+            default="Как в сервисе",
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "Как в документе", "label": "Язык меток: как в документе"},
+                        {"value": "ru", "label": "Язык меток: русский"},
+                        {"value": "en", "label": "Язык меток: английский"},
+                        {"value": "Как в сервисе", "label": "Язык меток: как в сервисе"},
+                    ],
+                }
+            },
+        )
+
+        # Язык распознавания: на каком языке искать ФИО, адреса и компании.
+        LANGUAGE: str = Field(
+            default="Как в сервисе",
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "Как в документе", "label": "Язык поиска: как в документе"},
+                        {"value": "ru", "label": "Язык поиска: русский"},
+                        {"value": "en", "label": "Язык поиска: английский"},
+                        {"value": "both", "label": "Язык поиска: оба"},
+                        {"value": "Как в сервисе", "label": "Язык поиска: как в сервисе"},
+                    ],
+                }
+            },
+        )
+
     def __init__(self):
         self.valves = self.Valves()
         self.file_handler = True
@@ -361,31 +520,124 @@ class Filter:
         except Exception:
             pass
 
-    def _commercial_flag(self):
-        """Значение COMMERCIAL → True / False / None(=настройка сервиса).
+    # Значения, означающие «взять настройку сервиса».
+    _AS_SERVICE = ("", "default", "как в сервисе", "настройка сервиса",
+                   "как в документе", "из сервиса")
+    _TRUE = ("включено", "1", "true", "on", "yes", "да", "вкл",
+             "enable", "enabled", "маскировать", "вычищать", "вырезать")
+    _FALSE = ("выключено", "0", "false", "off", "no", "нет", "выкл",
+              "disable", "disabled", "не трогать", "оставлять")
 
-        Принимаем подписи из интерфейса («Включено»/«Выключено»/«Как в
-        сервисе») и технические значения (1/0/true/false/on/off/да/нет/вкл/выкл).
-        Неизвестное значение — None: не ломаем обезличивание из-за опечатки
-        в настройке (сервис возьмёт своё значение по умолчанию).
+    def _bool_valve(self, name: str):
+        """Значение булева переключателя → True / False / None.
+
+        None — «не задано»: берётся настройка сервиса. Принимаем подписи из
+        интерфейса («Включено»/«Выключено»/«Не трогать»/«Маскировать» и т. п.)
+        и технические значения (1/0/true/false/on/off/да/нет/вкл/выкл).
+        Неизвестное значение — None: опечатка в настройке не должна ломать
+        обезличивание.
         """
-        raw = str(getattr(self.valves, "COMMERCIAL", "Как в сервисе")).strip().lower()
-        if raw in ("", "default", "как в сервисе", "настройка сервиса"):
+        raw = str(getattr(self.valves, name, "")).strip().lower()
+        if raw in self._AS_SERVICE:
             return None
-        if raw in ("включено", "1", "true", "on", "yes", "да", "вкл",
-                   "enable", "enabled"):
+        if raw in self._TRUE:
             return True
-        if raw in ("выключено", "0", "false", "off", "no", "нет", "выкл",
-                   "disable", "disabled"):
+        if raw in self._FALSE:
             return False
         return None
 
-    def _anonymize(self, raw: bytes, filename: str):
-        files = {"file": (filename or "document.bin", raw)}
+    def _text_valve(self, name: str):
+        """Значение строкового переключателя → значение или None.
+
+        «Как в сервисе»/«Как в документе» — не задано, сервис возьмёт своё.
+        """
+        raw = str(getattr(self.valves, name, "")).strip()
+        if raw.lower() in self._AS_SERVICE:
+            return None
+        return raw or None
+
+    def _commercial_flag(self):
+        """Значение COMMERCIAL → True / False / None(=настройка сервиса)."""
+        return self._bool_valve("COMMERCIAL")
+
+    def _service_params(self):
+        """Собирает параметры запроса к сервису из Valves.
+
+        Каждый переключатель независим: не заданное значение не передаётся,
+        и сервис берёт свою настройку по умолчанию.
+        """
         params = {}
-        commercial = self._commercial_flag()
+
+        # ── группа «Коммерческая информация» ──
+        commercial = self._bool_valve("COMMERCIAL")
         if commercial is not None:
             params["commercial"] = "1" if commercial else "0"
+
+        # ── режим замены ──
+        mode = self._text_valve("MODE")
+        if mode:
+            # «Метки» → placeholder, «Звёздочки» → mask, «Удалить» → delete.
+            mode_map = {
+                "метки": "placeholder",
+                "placeholder": "placeholder",
+                "звёздочки": "mask",
+                "звездочки": "mask",
+                "mask": "mask",
+                "удалить": "delete",
+                "delete": "delete",
+            }
+            mapped = mode_map.get(mode.lower())
+            if mapped:
+                params["mode"] = mapped
+
+        # ── нейросеть (NER) ──
+        ner = self._bool_valve("NER_ENABLED")
+        if ner is not None:
+            params["nerEnabled"] = "1" if ner else "0"
+
+        threshold = self._text_valve("NER_THRESHOLD")
+        if threshold:
+            try:
+                value = float(threshold)
+            except (TypeError, ValueError):
+                value = None
+            if value is not None and 0.0 <= value <= 1.0:
+                params["nerThreshold"] = str(value)
+
+        # ── детекторы ──
+        gov = self._bool_valve("GOV_ENTITIES")
+        if gov is not None:
+            # «Не трогать» → True (ядро не трогает госорганы),
+            # «Маскировать» → False (ядро маскирует наравне с остальными).
+            params["govEntities"] = "1" if gov else "0"
+
+        dict_names = self._bool_valve("DICT_NAMES")
+        if dict_names is not None:
+            params["dictNames"] = "1" if dict_names else "0"
+
+        # ── метаданные и встроенные объекты ──
+        keep_meta = self._bool_valve("KEEP_METADATA")
+        if keep_meta is not None:
+            params["keepMetadata"] = "1" if keep_meta else "0"
+
+        strip = self._bool_valve("STRIP_EMBEDDED")
+        if strip is not None:
+            params["stripEmbedded"] = "1" if strip else "0"
+
+        # ── языки ──
+        ph_lang = self._text_valve("PLACEHOLDER_LANGUAGE")
+        if ph_lang:
+            params["placeholderLanguage"] = ph_lang
+
+        lang = self._text_valve("LANGUAGE")
+        if lang:
+            params["language"] = lang
+
+        return params
+
+    def _anonymize(self, raw: bytes, filename: str):
+        files = {"file": (filename or "document.bin", raw)}
+        params = self._service_params()
         r = requests.post(
             self._service("/anonymize"),
             files=files,
