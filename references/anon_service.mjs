@@ -20,7 +20,7 @@
  */
 import { createServer } from 'node:http';
 import { spawn } from 'node:child_process';
-import { readFile, writeFile, mkdir, rm } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, rm, readdir, stat } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join, resolve, extname, basename } from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -73,6 +73,46 @@ function profileSettings(profileId) {
 const NER_DIR = process.env.DOCX_ANON_NER || '/srv/ner';
 const WRAPPER = process.env.DOCX_ANON_WRAPPER || join(SKILL_DIR, 'scripts', 'anonymize.mjs');
 const WORKDIR = process.env.DOCX_ANON_WORKDIR || '/srv/state';
+// Срок жизни карты замен на диске. В карте лежат ИСХОДНЫЕ персональные
+// данные, поэтому она не должна жить вечно. По умолчанию — сутки.
+const MAP_TTL_HOURS = Number(process.env.DOCX_ANON_MAP_TTL_HOURS || 24);
+const CLEANUP_INTERVAL_SEC = Number(process.env.DOCX_ANON_CLEANUP_INTERVAL_SEC || 300);
+let lastCleanup = 0;
+
+/**
+ * Удаляет старые карты замен из WORKDIR.
+ *
+ * Карта — это исходные ПДн на диске. Без уборки они копятся бессрочно.
+ * Фильтр чистит свой каталог (WORKDIR фильтра), сервис — свой; уборка
+ * нужна в обоих.
+ */
+async function cleanupMaps() {
+  const now = Date.now();
+  if (now - lastCleanup < CLEANUP_INTERVAL_SEC * 1000) return;
+  lastCleanup = now;
+  const ttl = Math.max(0, MAP_TTL_HOURS) * 3600 * 1000;
+  let names;
+  try {
+    names = await readdir(WORKDIR);
+  } catch {
+    return;
+  }
+  let removed = 0;
+  for (const name of names) {
+    if (!name.endsWith('.map.json')) continue;
+    const p = join(WORKDIR, name);
+    try {
+      const st = await stat(p);
+      if (now - st.mtimeMs > ttl) {
+        await rm(p, { force: true });
+        removed++;
+      }
+    } catch {
+      // файл исчез или недоступен — пропускаем
+    }
+  }
+  if (removed) log(`cleanup: удалено старых карт — ${removed}`);
+}
 const PORT = Number(process.env.DOCX_ANON_PORT || 8971);
 // По умолчанию — только localhost: сервис обрабатывает ПДн, и открывать его
 // в сеть без авторизации нельзя. Открытый адрес — осознанное решение
@@ -619,6 +659,7 @@ const server = createServer(async (req, res) => {
         if (!r.text || !r.text.trim()) {
           return json(res, 422, { error: 'EMPTY_TEXT', detail: 'не удалось извлечь текст' });
         }
+        await cleanupMaps();
         await mkdir(WORKDIR, { recursive: true });
         const id = `${Date.now()}_${Math.random().toString(36).slice(2, 10)}`;
         await writeFile(join(WORKDIR, `${id}.map.json`), JSON.stringify(r.map), { mode: 0o600 });
