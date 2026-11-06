@@ -102,6 +102,7 @@ const {
   applyDecisions,
   fromText,
   defaultSettings,
+  effectiveSettings,
   deanonymize,
   restoreDocx,
   restoreText,
@@ -109,9 +110,54 @@ const {
   buildLayout,
 } = core;
 
+/**
+ * Дополнительные настройки из JSON (--settings-json).
+ *
+ * Схема сервиса передаёт сюда то, что не выражается флагами: списки
+ * (maskedCompanies, exclusions, customCategories, nerStoplist), отдельные
+ * переключатели категорий (categories) и профиль (profile).
+ *
+ * Ключи накладываются на defaultSettings() ПОВЕРХ defaults: отсутствующий
+ * ключ означает «взять дефолт ядра» (в т.ч. для categories[id] ядро само
+ * берёт defaultOn из каталога категорий).
+ */
+function readExtraSettings() {
+  const raw = arg('--settings-json');
+  if (!raw || raw === true) return {};
+  let parsed;
+  try {
+    parsed = JSON.parse(String(raw));
+  } catch (e) {
+    die(`--settings-json: невалидный JSON (${e.message})`);
+  }
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    die('--settings-json: ожидается объект с настройками');
+  }
+  return parsed;
+}
+
 /** Настройки поверх defaultSettings() — те же поля, что и в расширении. */
 function buildSettings() {
   const s = { ...defaultSettings() };
+  const extra = readExtraSettings();
+
+  // Профиль ядра («Для LLM» / «Для внешней передачи») — набор overrides.
+  // Применяется ПЕРЕД индивидуальными настройками: явный выбор оператора
+  // важнее профиля (как в расширении, где значения профиля — сохранённый
+  // набор, а конкретные поля меняются отдельно).
+  const profileId = extra.profile || arg('--profile');
+  if (profileId) {
+    const pid = String(profileId);
+    const profiles = s.profiles || [];
+    if (profiles.some((p) => p && p.id === pid)) {
+      Object.assign(s, effectiveSettings(s, pid));
+    } else {
+      // Неизвестный профиль — предупреждение и работа без него. Запрос не
+      // роняем: иначе опечатка в настройке заблокирует все документы.
+      console.error(`anonymize: неизвестный профиль «${pid}» — профиль не применён `
+        + `(доступны: ${profiles.map((p) => p.id).join(', ')})`);
+    }
+  }
 
   // --- Коммерческая информация (группа commercial) ---
   const commercial = boolFlag('--commercial');
@@ -157,7 +203,92 @@ function buildSettings() {
   const dict = boolFlag('--dict-names');
   if (dict !== undefined) s.dictNames = dict;
 
+  // --- Структурированные настройки (--settings-json) ---
+  // Списки и объекты не выражаются флагами: список компаний, исключения,
+  // свои категории, стоп-лист модели, отдельные переключатели категорий.
+  applyExtraSettings(s, extra);
+
   return s;
+}
+
+/**
+ * Накладывает структурированные настройки на объект настроек ядра.
+ *
+ * Порядок: сначала профиль (выше), потом флаги, потом эти ключи — то есть
+ * явное значение оператора важнее профиля.
+ *
+ * `categories` накладывается ПОВЕРХ categories по умолчанию: отсутствующий
+ * id остаётся на своём defaultOn из каталога категорий ядра.
+ *
+ * Некорректное значение ИГНОРИРУЕТСЯ (с предупреждением), а не роняет
+ * запрос: опечатка в настройке не должна блокировать обезличивание
+ * документов. Документы защищает fail-closed в фильтре, а не испорченная
+ * настройка.
+ */
+function applyExtraSettings(s, extra) {
+  const warn = (msg) => console.error(`anonymize: настройка проигнорирована — ${msg}`);
+  for (const [key, value] of Object.entries(extra || {})) {
+    if (key === 'profile') continue; // профиль уже применён
+    if (value === undefined || value === null) continue;
+    switch (key) {
+      case 'categories': {
+        if (!value || typeof value !== 'object' || Array.isArray(value)) {
+          warn('categories должен быть объектом {ID: true|false}');
+          break;
+        }
+        const clean = {};
+        for (const [id, on] of Object.entries(value)) {
+          if (typeof on !== 'boolean') {
+            warn(`categories.${id} должен быть true/false`);
+            continue;
+          }
+          clean[id] = on;
+        }
+        s.categories = { ...(s.categories || {}), ...clean };
+        break;
+      }
+      case 'maskedCompanies':
+      case 'exclusions':
+      case 'customCategories':
+      case 'nerStoplist': {
+        if (!Array.isArray(value)) {
+          warn(`${key} должен быть списком`);
+          break;
+        }
+        s[key] = value;
+        break;
+      }
+      case 'nerThreshold':
+      case 'nerThresholdOrg':
+      case 'maxFileSizeMB': {
+        const n = Number(value);
+        if (!Number.isFinite(n)) warn(`${key} должен быть числом`);
+        else s[key] = n;
+        break;
+      }
+      case 'commercial':
+      case 'nerEnabled':
+      case 'keepMetadata':
+      case 'stripEmbedded':
+      case 'govEntities':
+      case 'dictNames': {
+        if (typeof value !== 'boolean') warn(`${key} должен быть true/false`);
+        else s[key] = value;
+        break;
+      }
+      case 'mode':
+      case 'language':
+      case 'placeholderLanguage': {
+        if (typeof value !== 'string') warn(`${key} должен быть строкой`);
+        else s[key] = value;
+        break;
+      }
+      default:
+        // Неизвестный ключ игнорируем: настройка из будущей версии ядра не
+        // должна ломать обезличивание.
+        break;
+    }
+  }
 }
 
 /** NER-провайдер из каталога модели (onnxruntime-web в Node, WASM, одна нить). */

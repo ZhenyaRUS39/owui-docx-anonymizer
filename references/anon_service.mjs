@@ -41,6 +41,35 @@ try {
 } catch {
   // ядро недоступно — фильтрация госорганов просто не работает
 }
+
+/**
+ * Настройки ядра по умолчанию и применение профиля.
+ *
+ * Нужны сервису, чтобы знать ЭФФЕКТИВНОЕ значение настройки: профиль
+ * «Для внешней передачи» меняет govEntities (маскировать госорганы) и
+ * stripEmbedded. Если считать эффективное значение только по запросу и
+ * окружению, профиль будет перебит флагом CLI, и «как в сервисе» станет
+ * вести себя иначе, чем явное значение.
+ */
+let CORE_DEFAULTS = null;
+let CORE_EFFECTIVE = null;
+try {
+  const st = await import(join(REPO, 'src/core/settings.js'));
+  CORE_DEFAULTS = st.defaultSettings();
+  CORE_EFFECTIVE = st.effectiveSettings;
+} catch {
+  // ядро недоступно — работаем на значениях по умолчанию сервиса
+}
+
+/** Эффективные настройки ядра с учётом профиля (null — профиль не задан). */
+function profileSettings(profileId) {
+  if (!profileId || !CORE_DEFAULTS || !CORE_EFFECTIVE) return null;
+  try {
+    return CORE_EFFECTIVE(CORE_DEFAULTS, String(profileId));
+  } catch {
+    return null;
+  }
+}
 const NER_DIR = process.env.DOCX_ANON_NER || '/srv/ner';
 const WRAPPER = process.env.DOCX_ANON_WRAPPER || join(SKILL_DIR, 'scripts', 'anonymize.mjs');
 const WORKDIR = process.env.DOCX_ANON_WORKDIR || '/srv/state';
@@ -59,6 +88,10 @@ const NER_ENABLED = process.env.DOCX_ANON_NER_ENABLED !== 'false';
 // Порог NER по умолчанию (якорь ядра — 0.7).
 const NER_THRESHOLD = process.env.DOCX_ANON_NER_THRESHOLD
   ? Number(process.env.DOCX_ANON_NER_THRESHOLD)
+  : undefined;
+// Порог NER для организаций (якорь ядра — 0.85: выше, иначе ложные организации).
+const NER_THRESHOLD_ORG = process.env.DOCX_ANON_NER_THRESHOLD_ORG
+  ? Number(process.env.DOCX_ANON_NER_THRESHOLD_ORG)
   : undefined;
 // Госорганы: true — не трогать, false — маскировать.
 const GOV_ENTITIES = process.env.DOCX_ANON_GOV_ENTITIES === 'false' ? false : undefined;
@@ -167,12 +200,16 @@ async function docxText(bytes) {
 //   mode                — режим замены: placeholder | mask | delete
 //   nerEnabled          — использовать модель NER
 //   nerThreshold        — порог NER (0..1)
+//   nerThresholdOrg     — порог NER для организаций (0..1)
 //   govEntities         — не трогать госорганы (true) / маскировать (false)
 //   dictNames           — словарный детектор ФИО третьих лиц
 //   keepMetadata        — оставлять метаданные docProps
 //   stripEmbedded       — вырезать встроенные OLE-объекты
 //   placeholderLanguage — язык меток: document | ru | en
 //   language            — язык распознавания: auto | ru | en | both
+//   extra               — структурированные настройки (JSON-объект):
+//                         profile, categories, maskedCompanies, exclusions,
+//                         nerStoplist, customCategories
 // undefined — берётся значение по умолчанию (или из окружения сервиса).
 async function anonymizeBuffer(bytes, filename, options = {}) {
   const ext = (extname(filename || '') || '.docx').toLowerCase();
@@ -202,6 +239,9 @@ async function anonymizeBuffer(bytes, filename, options = {}) {
   if (options.nerThreshold === undefined && NER_THRESHOLD !== undefined) {
     options.nerThreshold = NER_THRESHOLD;
   }
+  if (options.nerThresholdOrg === undefined && NER_THRESHOLD_ORG !== undefined) {
+    options.nerThresholdOrg = NER_THRESHOLD_ORG;
+  }
   if (options.govEntities === undefined && GOV_ENTITIES !== undefined) {
     options.govEntities = GOV_ENTITIES;
   }
@@ -225,21 +265,44 @@ async function anonymizeBuffer(bytes, filename, options = {}) {
   if (typeof options.nerThreshold === 'number' && Number.isFinite(options.nerThreshold)) {
     args.push('--ner-threshold', String(options.nerThreshold));
   }
+  if (typeof options.nerThresholdOrg === 'number' && Number.isFinite(options.nerThresholdOrg)) {
+    args.push('--ner-threshold-org', String(options.nerThresholdOrg));
+  }
 
   // --- детекторы ---
-  if (options.govEntities === false) args.push('--no-gov-entities');
-  else if (options.govEntities === true) args.push('--gov-entities');
+  // Госорганы: эффективное значение = запрос → окружение → профиль → дефолт
+  // ядра (true = «не трогать»). Дефолт обязан совпадать с тем, что уходит в
+  // CLI: иначе модель маскирует госорган, а пост-фильтр его не возвращает —
+  // «как в сервисе» вёл бы себя иначе, чем явное «не трогать».
+  const prof = profileSettings(options.extra && options.extra.profile);
+  const govEff = options.govEntities === undefined
+    ? (GOV_ENTITIES !== undefined
+        ? GOV_ENTITIES
+        : (prof && prof.govEntities !== undefined ? prof.govEntities : true))
+    : options.govEntities;
+  if (govEff === false) args.push('--no-gov-entities');
+  else args.push('--gov-entities');
   if (options.dictNames === false) args.push('--no-dict-names');
   else if (options.dictNames === true) args.push('--dict-names');
 
   // --- метаданные и встроенные объекты ---
   if (options.keepMetadata === true) args.push('--keep-metadata');
   else if (options.keepMetadata === false) args.push('--no-keep-metadata');
+  // Явное «оставлять» должно перебивать профиль «Для внешней передачи»
+  // (он включает вырезание), поэтому false тоже передаём.
   if (options.stripEmbedded === true) args.push('--strip-embedded');
+  else if (options.stripEmbedded === false) args.push('--no-strip-embedded');
 
   // --- языки ---
   if (options.placeholderLanguage) args.push('--placeholder-language', options.placeholderLanguage);
   if (options.language) args.push('--language', options.language);
+
+  // --- структурированные настройки (профиль, списки, категории) ---
+  // Их нельзя выразить отдельными флагами: это списки и объекты.
+  // Передаём ядру одним JSON-объектом.
+  if (options.extra && typeof options.extra === 'object' && Object.keys(options.extra).length) {
+    args.push('--settings-json', JSON.stringify(options.extra));
+  }
 
   const r = await runWrapper(args);
   if (r.code !== 0) {
@@ -264,7 +327,9 @@ async function anonymizeBuffer(bytes, filename, options = {}) {
 
   // «Госорганы: не трогать» — модель NER маскирует их сама, правило ядра
   // на NER-спаны не действует. Возвращаем госорганы как есть.
-  if (options.govEntities === true && map && Array.isArray(map.entries)) {
+  // Используется эффективное значение (запрос → окружение → дефолт ядра),
+  // иначе «как в сервисе» маскировал бы госорган, а «не трогать» — нет.
+  if (govEff === true && map && Array.isArray(map.entries)) {
     const filtered = stripGovEntities(map, text);
     map = filtered.map;
     text = filtered.text;
@@ -472,6 +537,12 @@ const server = createServer(async (req, res) => {
         if (Number.isFinite(n) && n >= 0 && n <= 1) options.nerThreshold = n;
       }
 
+      const vThresholdOrg = fieldValue('nerThresholdOrg');
+      if (vThresholdOrg !== null && vThresholdOrg !== '') {
+        const n = Number(vThresholdOrg);
+        if (Number.isFinite(n) && n >= 0 && n <= 1) options.nerThresholdOrg = n;
+      }
+
       const vGov = asBool(fieldValue('govEntities'));
       if (vGov !== undefined) options.govEntities = vGov;
 
@@ -489,6 +560,23 @@ const server = createServer(async (req, res) => {
 
       const vLang = fieldValue('language');
       if (vLang) options.language = vLang;
+
+      // Структурированные настройки — JSON-объект в теле запроса (поле
+      // `settings`): профиль, список компаний, исключения, стоп-лист
+      // модели, свои категории, индивидуальные переключатели категорий.
+      const vSettings = fieldValue('settings');
+      if (vSettings) {
+        try {
+          const parsed = JSON.parse(vSettings);
+          if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+            options.extra = parsed;
+          } else {
+            log('settings: ожидается объект JSON — игнорировано');
+          }
+        } catch (e) {
+          log('settings: невалидный JSON — игнорировано:', e.message);
+        }
+      }
 
       try {
         const r = await anonymizeBuffer(file.data, file.filename, options);

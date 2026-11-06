@@ -78,13 +78,29 @@ def _strip_attached_files_in_list(items):
 
 class Filter:
     class Valves(BaseModel):
+        # ── Технические параметры плагина ──────────────────────────────────
         # Адрес локального сервиса обезличивания (контейнер docx-anon-service,
         # host-network — 127.0.0.1:8971 доступен и из контейнера open-webui).
-        SERVICE_URL: str = "http://127.0.0.1:8971"
+        SERVICE_URL: str = Field(
+            default="http://127.0.0.1:8971",
+            title="Адрес сервиса обезличивания",
+            description="HTTP-сервис, который выполняет обезличивание. "
+                        "По умолчанию — локальный контейнер на порту 8971.",
+        )
         # Таймаут запроса в секундах (PDF на 50 страниц ~ 10-20 с).
-        TIMEOUT: int = 300
+        TIMEOUT: int = Field(
+            default=300,
+            title="Таймаут, с",
+            description="Сколько ждать ответа сервиса обезличивания. "
+                        "Для больших PDF нужно 300 с и больше.",
+        )
         # Максимальный размер файла, МБ. Больше — не выпускаем (fail-closed).
-        MAX_FILE_MB: int = 50
+        MAX_FILE_MB: int = Field(
+            default=50,
+            title="Максимальный размер файла, МБ",
+            description="Файлы больше этого размера не отправляются модели: "
+                        "пользователь получает предупреждение.",
+        )
         # Что делать с документом, который не удалось обезличить:
         #   True  — НЕ выпускать его к модели (fail-closed): оригинал удаляется
         #            из тела запроса, пользователю показывается плашка.
@@ -93,30 +109,66 @@ class Filter:
         #            равно отправляет запрос к модели (main.py:1700-1706),
         #            то есть уже с оригиналом.
         #   False — выпустить как есть (ОПАСНО: ПДн уедут к модели).
-        FAIL_CLOSED: bool = True
+        FAIL_CLOSED: bool = Field(
+            default=True,
+            title="Не пропускать документы при сбое",
+            description="Включено: если документ не удалось обезличить, он не "
+                        "уходит к модели, пользователь видит предупреждение. "
+                        "Выключено: документ уйдёт к модели с ПДн — небезопасно.",
+        )
         # Максимальный размер ответа модели, который пропускаем через восстановление.
-        MAX_RESTORE_CHARS: int = 200000
+        MAX_RESTORE_CHARS: int = Field(
+            default=200000,
+            title="Максимальный размер ответа для восстановления, символов",
+            description="Ответ модели длиннее этого не проверяется на метки. "
+                        "Обычно хватает 200000.",
+        )
         # Хранить карту замен на диске (WORKDIR). Там лежат исходные ПДн.
-        WORKDIR: str = "/tmp/docx-anon"
+        WORKDIR: str = Field(
+            default="/tmp/docx-anon",
+            title="Каталог карт замен",
+            description="Здесь сервис хранит карты замен (исходные ПДн) и аудит-лог. "
+                        "Файл 0600, только root. Старые карты удаляются автоматически.",
+        )
         # Сколько часов живёт карта замен. Карта нужна, пока идёт чат:
         # в inlet создаётся, в outlet читается. Дальше она — просто исходные
         # ПДн на диске, поэтому старые карты удаляются.
-        MAP_TTL_HOURS: int = 24
+        MAP_TTL_HOURS: int = Field(
+            default=24,
+            title="Срок жизни карты замен, ч",
+            description="Через сколько часов карта замен удаляется с диска. "
+                        "Карта нужна только пока идёт чат.",
+        )
         # Как часто чистить (в inlet, не чаще раза в N секунд).
-        CLEANUP_INTERVAL_SEC: int = 300
+        CLEANUP_INTERVAL_SEC: int = Field(
+            default=300,
+            title="Интервал уборки карт, с",
+            description="Как часто фильтр проверяет диск и удаляет старые карты замен.",
+        )
         # Токен сервиса обезличивания. Обязателен, если сервис слушает
         # не только localhost (DOCX_ANON_HOST != 127.0.0.1).
-        SERVICE_TOKEN: str = ""
-        # Группа «Коммерческая информация» (названия компаний, товарные знаки
-        # и часть реквизитов юрлиц).
-        #   «Включено» — маскировать коммерческие данные (то же, что
-        #     --commercial в ядре; по умолчанию сервис работает в этом режиме);
+        SERVICE_TOKEN: str = Field(
+            default="",
+            title="Токен сервиса",
+            description="Обязателен, если сервис слушает не только localhost. "
+                        "Вводить вручную нужно только при смене токена на сервере.",
+        )
+
+        # ── Обезличивание: категории ───────────────────────────────────────
+        # Группа «Коммерческая информация» (названия компаний, номера договоров
+        # и суммы) — единственная выключаемая: ПДн (pii) и реквизиты (ids)
+        # маскируются ВСЕГДА.
+        #   «Включено» — маскировать коммерческие данные;
         #   «Выключено» — не маскировать: в документе останутся названия
-        #     компаний. Персональные данные (pii/ids) маскируются ВСЕГДА —
-        #     настройка на них не влияет.
+        #     компаний, номера договоров и суммы;
         #   «Как в сервисе» — взять настройку сервиса (DOCX_ANON_COMMERCIAL).
         COMMERCIAL: str = Field(
             default="Как в сервисе",
+            title="Коммерческая информация",
+            description="Названия организаций, номера договоров, суммы. "
+                        "**Включено** — маскировать; **Выключено** — оставлять "
+                        "(ПДн и реквизиты при этом маскируются всегда). "
+                        "**Как в сервисе** — значение по умолчанию сервиса.",
             json_schema_extra={
                 "input": {
                     "type": "select",
@@ -129,7 +181,74 @@ class Filter:
             },
         )
 
-        # ── Режим замены ПДн ──────────────────────────────────────────────
+        # Отдельные переключатели внутри коммерческой группы.
+        # Действуют только при «Коммерческая: включено».
+        # По умолчанию ядро маскирует организации, а номера договоров и суммы —
+        # нет (их нужно включать явно).
+        CATEGORY_COMPANY: str = Field(
+            default="Как в сервисе",
+            title="Названия организаций",
+            description="Маскировать ли названия компаний. "
+                        "Действует, только если включена «Коммерческая информация».",
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "Маскировать", "label": "Организации: маскировать"},
+                        {"value": "Не маскировать", "label": "Организации: не маскировать"},
+                        {"value": "Как в сервисе", "label": "Организации: как в сервисе"},
+                    ],
+                }
+            },
+        )
+
+        CATEGORY_CONTRACT: str = Field(
+            default="Как в сервисе",
+            title="Номера договоров",
+            description="Маскировать ли номера договоров и контрактов. "
+                        "Действует, только если включена «Коммерческая информация».",
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "Маскировать", "label": "Номера договоров: маскировать"},
+                        {"value": "Не маскировать", "label": "Номера договоров: не маскировать"},
+                        {"value": "Как в сервисе", "label": "Номера договоров: как в сервисе"},
+                    ],
+                }
+            },
+        )
+
+        CATEGORY_AMOUNT: str = Field(
+            default="Как в сервисе",
+            title="Суммы",
+            description="Маскировать ли суммы и цены. "
+                        "Действует, только если включена «Коммерческая информация».",
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "Маскировать", "label": "Суммы: маскировать"},
+                        {"value": "Не маскировать", "label": "Суммы: не маскировать"},
+                        {"value": "Как в сервисе", "label": "Суммы: как в сервисе"},
+                    ],
+                }
+            },
+        )
+
+        # Список компаний, которые маскируются ВСЕГДА — даже при выключенной
+        # коммерческой группе. Своя организация на обороте: «ООО Ромашка».
+        MASKED_COMPANIES: str = Field(
+            default="",
+            title="Список компаний для маскирования",
+            description="Компании, которые маскируются всегда, независимо от "
+                        "«Коммерческой информации». По одной в строке. "
+                        "Псевдонимы — после «|» через запятую: "
+                        "**ООО Ромашка | Ромашка, Ромашка-М**. "
+                        "До 200 компаний, до 20 псевдонимов у каждой.",
+        )
+
+        # ── Обезличивание: режим и языки ───────────────────────────────────
         #   «Метки»   — [ФИО_1], [ПАСПОРТ_1]: значения можно восстановить;
         #   «Звёздочки»— XXXXXX XXXX: значение не восстановить, но видно, что
         #                было что-то заменено;
@@ -137,6 +256,11 @@ class Filter:
         #   «Как в сервисе» — DOCX_ANON_MODE.
         MODE: str = Field(
             default="Как в сервисе",
+            title="Режим замены",
+            description="**Метки** — `[ФИО_1]`, значение можно восстановить в ответе; "
+                        "**Звёздочки** — `XXXXXX`, восстановить нельзя; "
+                        "**Удалить** — `[удалено]`. "
+                        "**Как в сервисе** — значение по умолчанию сервиса.",
             json_schema_extra={
                 "input": {
                     "type": "select",
@@ -150,12 +274,37 @@ class Filter:
             },
         )
 
+        # Профиль настроек ядра — набор готовых значений.
+        PROFILE: str = Field(
+            default="Как в сервисе",
+            title="Профиль настроек",
+            description="**Для LLM** — базовый режим: ПДн и реквизиты маскируются, "
+                        "коммерческая информация по умолчанию не трогается. "
+                        "**Для внешней передачи** — всё включается, госорганы "
+                        "маскируются, встроенные объекты вырезаются. "
+                        "Индивидуальные переключатели важнее профиля.",
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "Как в сервисе", "label": "Профиль: как в сервисе"},
+                        {"value": "llm", "label": "Профиль: для LLM"},
+                        {"value": "external", "label": "Профиль: для внешней передачи"},
+                    ],
+                }
+            },
+        )
+
         # ── Нейросеть (NER) ───────────────────────────────────────────────
         # Модель распознаёт ФИО и организации, которых нет в словарях и
         # правилах. Выключение ускоряет обработку, но часть имён останется
         # незамаскированной.
         NER_ENABLED: str = Field(
             default="Как в сервисе",
+            title="Нейросеть (NER)",
+            description="Модель распознавания имён и организаций. Нужна для ФИО "
+                        "третьих лиц без меток. **Выключено** — быстрее, но часть "
+                        "имён останется в тексте.",
             json_schema_extra={
                 "input": {
                     "type": "select",
@@ -172,6 +321,9 @@ class Filter:
         # но выше риск ложных срабатываний. 0.7 — значение ядра по умолчанию.
         NER_THRESHOLD: str = Field(
             default="Как в сервисе",
+            title="Порог нейросети (ФИО, адреса)",
+            description="Ниже — больше имён находится, но выше риск ложных "
+                        "срабатываний. По умолчанию 0.7.",
             json_schema_extra={
                 "input": {
                     "type": "select",
@@ -186,12 +338,47 @@ class Filter:
             },
         )
 
+        # Порог для организаций — выше, чем для ФИО: иначе модель выдаёт
+        # десятки ложных организаций. По умолчанию 0.85.
+        NER_THRESHOLD_ORG: str = Field(
+            default="Как в сервисе",
+            title="Порог нейросети (организации)",
+            description="Порог для организаций. Выше значения для ФИО — иначе "
+                        "модель выдаёт ложные организации. По умолчанию 0.85.",
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "Как в сервисе", "label": "Порог организаций: как в сервисе"},
+                        {"value": "0.5", "label": "Порог организаций: 0.5"},
+                        {"value": "0.7", "label": "Порог организаций: 0.7"},
+                        {"value": "0.85", "label": "Порог организаций: 0.85 (по умолчанию)"},
+                        {"value": "0.95", "label": "Порог организаций: 0.95"},
+                    ],
+                }
+            },
+        )
+
+        # Стоп-лист модельных организаций: то, что модель ошибочно считает
+        # организацией, но маскировать не нужно.
+        NER_STOPLIST: str = Field(
+            default="",
+            title="Стоп-лист организаций",
+            description="Названия, которые модель ошибочно считает организациями, "
+                        "но маскировать их не нужно. По одному в строке, до 500 штук.",
+        )
+
         # ── Детекторы ─────────────────────────────────────────────────────
         # Госорганы: «Не трогать» — ФНС, МВД, Сбербанк и прочие из списка
         # ядра остаются как есть; «Маскировать» — маскируются наравне с
         # остальными организациями.
         GOV_ENTITIES: str = Field(
             default="Как в сервисе",
+            title="Госорганы",
+            description="**Не трогать** — ФНС, МВД, Сбербанк и прочие госорганы "
+                        "из списка ядра остаются как есть; **Маскировать** — "
+                        "маскируются наравне с остальными организациями. "
+                        "**Как в сервисе** — значение по умолчанию сервиса.",
             json_schema_extra={
                 "input": {
                     "type": "select",
@@ -208,6 +395,9 @@ class Filter:
         # срабатывания на названиях компаний и наоборот).
         DICT_NAMES: str = Field(
             default="Как в сервисе",
+            title="Словарь имён",
+            description="Уточняет распознавание ФИО по большому словарю. "
+                        "Уменьшает ложные срабатывания.",
             json_schema_extra={
                 "input": {
                     "type": "select",
@@ -225,6 +415,10 @@ class Filter:
         # По умолчанию ядро их вычищает.
         KEEP_METADATA: str = Field(
             default="Как в сервисе",
+            title="Метаданные документа",
+            description="**Вычищать** — автор, компания и время правки в свойствах "
+                        "документа удаляются (безопасно); **Оставлять** — остаются "
+                        "как есть. **Как в сервисе** — значение по умолчанию сервиса.",
             json_schema_extra={
                 "input": {
                     "type": "select",
@@ -241,6 +435,10 @@ class Filter:
         # при включении оно вырезает их из файла.
         STRIP_EMBEDDED: str = Field(
             default="Как в сервисе",
+            title="Встроенные объекты",
+            description="**Вырезать** — OLE-вложения и диаграммы удаляются из файла "
+                        "(ядро их не обезличивает); **Оставлять** — остаются. "
+                        "**Как в сервисе** — значение по умолчанию сервиса.",
             json_schema_extra={
                 "input": {
                     "type": "select",
@@ -258,6 +456,10 @@ class Filter:
         # «Как в документе» — язык берётся из самого документа.
         PLACEHOLDER_LANGUAGE: str = Field(
             default="Как в сервисе",
+            title="Язык меток",
+            description="Язык текста меток: `[ФИО_1]` или `[PERSON_1]`. "
+                        "**Как в документе** — язык берётся из документа. "
+                        "**Как в сервисе** — значение по умолчанию сервиса.",
             json_schema_extra={
                 "input": {
                     "type": "select",
@@ -274,6 +476,10 @@ class Filter:
         # Язык распознавания: на каком языке искать ФИО, адреса и компании.
         LANGUAGE: str = Field(
             default="Как в сервисе",
+            title="Язык поиска данных",
+            description="На каком языке искать ФИО, адреса и компании: **ru**, **en**, "
+                        "**both**, **Как в документе** (по языку текста). "
+                        "**Как в сервисе** — значение по умолчанию сервиса.",
             json_schema_extra={
                 "input": {
                     "type": "select",
@@ -286,6 +492,30 @@ class Filter:
                     ],
                 }
             },
+        )
+
+        # ── Исключения и свои категории ───────────────────────────────────
+        # Что НЕ маскировать: например, «Иванов Иван Иванович, директор» —
+        # если известное ФИО оставлять как есть.
+        EXCLUSIONS: str = Field(
+            default="",
+            title="Исключения (что не маскировать)",
+            description="Значения, которые обезличивать НЕ нужно. По одной в строке, "
+                        "через «|» — категория: **Иванов Иван Иванович | PERSON**. "
+                        "Категории: PERSON, INN, ADDRESS, PHONE, EMAIL, PASSPORT, "
+                        "COMPANY и другие.",
+        )
+
+        # Свои категории — например, «номер проекта» или «кодовое имя».
+        CUSTOM_CATEGORIES: str = Field(
+            default="",
+            title="Свои категории (JSON)",
+            description="Дополнительные категории в формате JSON (массив). "
+                        "Каждая: `{\"id\": \"custom:project\", \"label\": {\"ru\": \"Проект\"}, "
+                        "\"placeholderPrefix\": {\"ru\": \"ПРОЕКТ\"}, \"kind\": \"dictionary\", "
+                        "\"dictionary\": {\"values\": [\"Орион\"]}}`. "
+                        "Виды: dictionary, labeled, pattern. До 100 категорий. "
+                        "Некорректный JSON игнорируется.",
         )
 
     def __init__(self):
@@ -524,16 +754,15 @@ class Filter:
     _AS_SERVICE = ("", "default", "как в сервисе", "настройка сервиса",
                    "как в документе", "из сервиса")
     _TRUE = ("включено", "1", "true", "on", "yes", "да", "вкл",
-             "enable", "enabled", "маскировать", "вычищать", "вырезать")
+             "enable", "enabled")
     _FALSE = ("выключено", "0", "false", "off", "no", "нет", "выкл",
-              "disable", "disabled", "не трогать", "оставлять")
+              "disable", "disabled")
 
     def _bool_valve(self, name: str):
         """Значение булева переключателя → True / False / None.
 
-        None — «не задано»: берётся настройка сервиса. Принимаем подписи из
-        интерфейса («Включено»/«Выключено»/«Не трогать»/«Маскировать» и т. п.)
-        и технические значения (1/0/true/false/on/off/да/нет/вкл/выкл).
+        None — «не задано»: берётся настройка сервиса. Принимаем технические
+        значения (1/0/true/false/on/off/да/нет/вкл/выкл).
         Неизвестное значение — None: опечатка в настройке не должна ломать
         обезличивание.
         """
@@ -559,6 +788,88 @@ class Filter:
     def _commercial_flag(self):
         """Значение COMMERCIAL → True / False / None(=настройка сервиса)."""
         return self._bool_valve("COMMERCIAL")
+
+    # ── Разбор списков из текстовых полей ────────────────────────────────
+    # Формат — одна запись в строке. Для компаний и исключений после «|»
+    # идёт дополнение (псевдонимы / категория).
+    @staticmethod
+    def _lines(text: str):
+        return [ln.strip() for ln in (text or "").splitlines() if ln.strip()]
+
+    def _masked_companies(self):
+        """Список компаний для маскирования → [{name, aliases}].
+
+        Формат строки: «ООО Ромашка | Ромашка, Ромашка-М».
+        """
+        out = []
+        for line in self._lines(getattr(self.valves, "MASKED_COMPANIES", "")):
+            name, _, aliases = line.partition("|")
+            name = name.strip()
+            if not name:
+                continue
+            alias_list = [a.strip() for a in aliases.split(",") if a.strip()]
+            entry = {"name": name[:120]}
+            if alias_list:
+                entry["aliases"] = alias_list[:20]
+            out.append(entry)
+            if len(out) >= 200:
+                break
+        return out
+
+    def _exclusions(self):
+        """Исключения → [{value, category}].
+
+        Формат строки: «Иванов Иван Иванович | PERSON».
+        """
+        out = []
+        for line in self._lines(getattr(self.valves, "EXCLUSIONS", "")):
+            value, _, category = line.partition("|")
+            value = value.strip()
+            category = category.strip().upper()
+            if not value:
+                continue
+            entry = {"value": value}
+            if category:
+                entry["category"] = category
+            out.append(entry)
+        return out
+
+    def _ner_stoplist(self):
+        """Стоп-лист модельных организаций — по строке на название."""
+        return [ln[:80] for ln in self._lines(getattr(self.valves, "NER_STOPLIST", ""))][:500]
+
+    def _custom_categories(self):
+        """Свои категории — JSON-массив. Некорректный JSON игнорируется."""
+        raw = (getattr(self.valves, "CUSTOM_CATEGORIES", "") or "").strip()
+        if not raw:
+            return []
+        try:
+            parsed = json.loads(raw)
+        except Exception:
+            return []
+        if not isinstance(parsed, list):
+            return []
+        return [c for c in parsed if isinstance(c, dict) and c.get("id")][:100]
+
+    def _categories_overrides(self):
+        """Индивидуальные переключатели категорий → {ID: bool}.
+
+        Только коммерческая группа: ПДн и реквизиты маскируются всегда.
+        """
+        out = {}
+        for valve, cat_id in (
+            ("CATEGORY_COMPANY", "COMPANY"),
+            ("CATEGORY_CONTRACT", "CONTRACT"),
+            ("CATEGORY_AMOUNT", "AMOUNT"),
+        ):
+            raw = str(getattr(self.valves, valve, "")).strip().lower()
+            if raw in self._AS_SERVICE:
+                continue
+            if raw in ("маскировать", "1", "true", "on", "yes", "да", "вкл"):
+                out[cat_id] = True
+            elif raw in ("не маскировать", "0", "false", "off", "no", "нет", "выкл"):
+                out[cat_id] = False
+        return out
 
     def _service_params(self):
         """Собирает параметры запроса к сервису из Valves.
@@ -604,25 +915,44 @@ class Filter:
             if value is not None and 0.0 <= value <= 1.0:
                 params["nerThreshold"] = str(value)
 
+        threshold_org = self._text_valve("NER_THRESHOLD_ORG")
+        if threshold_org:
+            try:
+                value = float(threshold_org)
+            except (TypeError, ValueError):
+                value = None
+            if value is not None and 0.0 <= value <= 1.0:
+                params["nerThresholdOrg"] = str(value)
+
         # ── детекторы ──
-        gov = self._bool_valve("GOV_ENTITIES")
-        if gov is not None:
-            # «Не трогать» → True (ядро не трогает госорганы),
-            # «Маскировать» → False (ядро маскирует наравне с остальными).
-            params["govEntities"] = "1" if gov else "0"
+        # «Не трогать» → govEntities=1 (ядро не маскирует госорганы),
+        # «Маскировать» → govEntities=0 (маскирует наравне с остальными).
+        gov_raw = str(getattr(self.valves, "GOV_ENTITIES", "")).strip().lower()
+        if gov_raw not in self._AS_SERVICE:
+            if gov_raw in ("не трогать", "1", "true", "on", "yes", "да", "вкл"):
+                params["govEntities"] = "1"
+            elif gov_raw in ("маскировать", "0", "false", "off", "no", "нет", "выкл"):
+                params["govEntities"] = "0"
 
         dict_names = self._bool_valve("DICT_NAMES")
         if dict_names is not None:
             params["dictNames"] = "1" if dict_names else "0"
 
         # ── метаданные и встроенные объекты ──
-        keep_meta = self._bool_valve("KEEP_METADATA")
-        if keep_meta is not None:
-            params["keepMetadata"] = "1" if keep_meta else "0"
+        # «Оставлять» → keepMetadata=1, «Вычищать» → keepMetadata=0.
+        meta_raw = str(getattr(self.valves, "KEEP_METADATA", "")).strip().lower()
+        if meta_raw not in self._AS_SERVICE:
+            if meta_raw in ("оставлять", "1", "true", "on", "yes", "да", "вкл"):
+                params["keepMetadata"] = "1"
+            elif meta_raw in ("вычищать", "0", "false", "off", "no", "нет", "выкл"):
+                params["keepMetadata"] = "0"
 
-        strip = self._bool_valve("STRIP_EMBEDDED")
-        if strip is not None:
-            params["stripEmbedded"] = "1" if strip else "0"
+        strip_raw = str(getattr(self.valves, "STRIP_EMBEDDED", "")).strip().lower()
+        if strip_raw not in self._AS_SERVICE:
+            if strip_raw in ("вырезать", "1", "true", "on", "yes", "да", "вкл"):
+                params["stripEmbedded"] = "1"
+            elif strip_raw in ("оставлять", "0", "false", "off", "no", "нет", "выкл"):
+                params["stripEmbedded"] = "0"
 
         # ── языки ──
         ph_lang = self._text_valve("PLACEHOLDER_LANGUAGE")
@@ -633,14 +963,43 @@ class Filter:
         if lang:
             params["language"] = lang
 
-        return params
+        # ── структурированные настройки ──
+        # Их нельзя выразить простым флагом: списки и объекты. Передаются
+        # одним JSON-объектом в поле `settings` запроса.
+        extra = {}
+        profile = self._text_valve("PROFILE")
+        if profile:
+            extra["profile"] = profile
+        cats = self._categories_overrides()
+        if cats:
+            extra["categories"] = cats
+        companies = self._masked_companies()
+        if companies:
+            extra["maskedCompanies"] = companies
+        exclusions = self._exclusions()
+        if exclusions:
+            extra["exclusions"] = exclusions
+        stoplist = self._ner_stoplist()
+        if stoplist:
+            extra["nerStoplist"] = stoplist
+        custom = self._custom_categories()
+        if custom:
+            extra["customCategories"] = custom
+        return params, extra
 
     def _anonymize(self, raw: bytes, filename: str):
+        params, extra = self._service_params()
         files = {"file": (filename or "document.bin", raw)}
-        params = self._service_params()
+        data = {}
+        if extra:
+            # Структурированные настройки (списки, объекты, профиль) — одним
+            # JSON-полем в теле запроса: обычные параметры запроса для них не
+            # годятся.
+            data["settings"] = json.dumps(extra, ensure_ascii=False)
         r = requests.post(
             self._service("/anonymize"),
             files=files,
+            data=data or None,
             params=params,
             headers=self._auth(),
             timeout=self.valves.TIMEOUT,

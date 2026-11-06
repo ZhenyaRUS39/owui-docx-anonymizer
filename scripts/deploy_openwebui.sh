@@ -271,29 +271,47 @@ owui_api_get "/api/v1/functions/id/$FILTER_ID" | python3 -c 'import json,sys; d=
 # сохраняется. Пустое значение означает «не задавать».
 #
 #   COMMERCIAL           — «Включено»/«Выключено»/«Как в сервисе»
+#   CATEGORY_COMPANY     — «Маскировать»/«Не маскировать»/«Как в сервисе»
+#   CATEGORY_CONTRACT    — «Маскировать»/«Не маскировать»/«Как в сервисе»
+#   CATEGORY_AMOUNT      — «Маскировать»/«Не маскировать»/«Как в сервисе»
 #   MODE                 — «Метки»/«Звёздочки»/«Удалить»/«Как в сервисе»
+#   PROFILE              — «Как в сервисе»/«llm»/«external»
 #   NER_ENABLED          — «Включено»/«Выключено»/«Как в сервисе»
 #   NER_THRESHOLD        — «0.5»/«0.7»/«0.85»/«0.95»/«Как в сервисе»
+#   NER_THRESHOLD_ORG    — «0.5»/«0.7»/«0.85»/«0.95»/«Как в сервисе»
 #   GOV_ENTITIES         — «Не трогать»/«Маскировать»/«Как в сервисе»
 #   DICT_NAMES           — «Включено»/«Выключено»/«Как в сервисе»
 #   KEEP_METADATA        — «Оставлять»/«Вычищать»/«Как в сервисе»
 #   STRIP_EMBEDDED       — «Вырезать»/«Оставлять»/«Как в сервисе»
 #   PLACEHOLDER_LANGUAGE — «ru»/«en»/«Как в документе»/«Как в сервисе»
 #   LANGUAGE             — «ru»/«en»/«both»/«Как в документе»/«Как в сервисе»
+#   MASKED_COMPANIES     — список компаний (по строке: «Название | псевдонимы»)
+#   EXCLUSIONS           — список исключений (по строке: «значение | КАТЕГОРИЯ»)
+#   NER_STOPLIST         — стоп-лист организаций (по строке)
+#   CUSTOM_CATEGORIES    — свои категории (JSON-массив)
 #
 # ВАЖНО: /valves/update ЗАМЕНЯЕТ объект целиком, а не мержит. Поэтому сначала
 # читаем текущие значения (их выставил оператор через интерфейс) и мержим с
 # ними — иначе деплой затирал бы выбор оператора и любые другие поля.
 COMMERCIAL="${COMMERCIAL:-}"
+CATEGORY_COMPANY="${CATEGORY_COMPANY:-}"
+CATEGORY_CONTRACT="${CATEGORY_CONTRACT:-}"
+CATEGORY_AMOUNT="${CATEGORY_AMOUNT:-}"
 MODE="${MODE:-}"
+PROFILE="${PROFILE:-}"
 NER_ENABLED="${NER_ENABLED:-}"
 NER_THRESHOLD="${NER_THRESHOLD:-}"
+NER_THRESHOLD_ORG="${NER_THRESHOLD_ORG:-}"
 GOV_ENTITIES="${GOV_ENTITIES:-}"
 DICT_NAMES="${DICT_NAMES:-}"
 KEEP_METADATA="${KEEP_METADATA:-}"
 STRIP_EMBEDDED="${STRIP_EMBEDDED:-}"
 PLACEHOLDER_LANGUAGE="${PLACEHOLDER_LANGUAGE:-}"
 LANGUAGE="${LANGUAGE:-}"
+MASKED_COMPANIES="${MASKED_COMPANIES:-}"
+EXCLUSIONS="${EXCLUSIONS:-}"
+NER_STOPLIST="${NER_STOPLIST:-}"
+CUSTOM_CATEGORIES="${CUSTOM_CATEGORIES:-}"
 
 # 1) Текущие значения — из API (то же, что видит интерфейс).
 CURRENT=$(ssh_ha "curl -s -H 'Authorization: Bearer $API_KEY' $OWUI_URL/api/v1/functions/id/$FILTER_ID/valves" 2>/dev/null || echo '{}')
@@ -301,16 +319,20 @@ CURRENT=$(ssh_ha "curl -s -H 'Authorization: Bearer $API_KEY' $OWUI_URL/api/v1/f
 # 2) Мержим: обязательные поля перезаписываем, переключатели — только если
 #    соответствующая переменная окружения задана, остальное сохраняем.
 python3 - "$SERVICE_TOKEN" "http://127.0.0.1:$PORT" "$CURRENT" \
-    "$COMMERCIAL" "$MODE" "$NER_ENABLED" "$NER_THRESHOLD" "$GOV_ENTITIES" \
-    "$DICT_NAMES" "$KEEP_METADATA" "$STRIP_EMBEDDED" \
-    "$PLACEHOLDER_LANGUAGE" "$LANGUAGE" <<'PY' > /tmp/owui_valves.json
+    "$COMMERCIAL" "$CATEGORY_COMPANY" "$CATEGORY_CONTRACT" "$CATEGORY_AMOUNT" \
+    "$MODE" "$PROFILE" "$NER_ENABLED" "$NER_THRESHOLD" "$NER_THRESHOLD_ORG" \
+    "$GOV_ENTITIES" "$DICT_NAMES" "$KEEP_METADATA" "$STRIP_EMBEDDED" \
+    "$PLACEHOLDER_LANGUAGE" "$LANGUAGE" "$MASKED_COMPANIES" "$EXCLUSIONS" \
+    "$NER_STOPLIST" "$CUSTOM_CATEGORIES" <<'PY' > /tmp/owui_valves.json
 import json, sys
 
 token, url, current = sys.argv[1], sys.argv[2], sys.argv[3]
 switches = dict(zip(
-    ["COMMERCIAL", "MODE", "NER_ENABLED", "NER_THRESHOLD", "GOV_ENTITIES",
-     "DICT_NAMES", "KEEP_METADATA", "STRIP_EMBEDDED",
-     "PLACEHOLDER_LANGUAGE", "LANGUAGE"],
+    ["COMMERCIAL", "CATEGORY_COMPANY", "CATEGORY_CONTRACT", "CATEGORY_AMOUNT",
+     "MODE", "PROFILE", "NER_ENABLED", "NER_THRESHOLD", "NER_THRESHOLD_ORG",
+     "GOV_ENTITIES", "DICT_NAMES", "KEEP_METADATA", "STRIP_EMBEDDED",
+     "PLACEHOLDER_LANGUAGE", "LANGUAGE", "MASKED_COMPANIES", "EXCLUSIONS",
+     "NER_STOPLIST", "CUSTOM_CATEGORIES"],
     sys.argv[4:]))
 
 try:
