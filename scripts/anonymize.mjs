@@ -16,7 +16,7 @@
 //
 // Выход: карта замен (mapping.json) — ключевой артефакт. Без неё восстановление невозможно.
 import { readFile, writeFile, mkdir } from 'node:fs/promises';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { dirname, join, resolve, extname } from 'node:path';
 import { pathToFileURL, fileURLToPath } from 'node:url';
 
@@ -95,6 +95,38 @@ function findRepo() {
 const repo = findRepo();
 const core = await import(pathToFileURL(join(repo, 'src', 'core', 'index.js')).href);
 core.registerBuiltinDetectors();
+
+/**
+ * Словари ФИО (ядро 0.5+).
+ *
+ * В 0.4 словари импортировались как JS-модули. С 0.5 это файлы
+ * `vendor/dict/*.txt`, которые читает `names/dict/load.js`. В браузере это
+ * делает offscreen/host.js, а в Node — мы: без загрузки getDicts() бросает
+ * ошибку, словарный детектор молчит, и ФИО не находятся (проверено: на
+ * «Сидоров Иван Иванович» ядро 0.5.1 без словарей не даёт ни одного PERSON).
+ */
+async function loadDictionaries() {
+  try {
+    const load = await import(pathToFileURL(join(repo, 'src', 'core', 'detect', 'names', 'dict', 'load.js')).href);
+    if (typeof load.loadDicts !== 'function') return; // ядро 0.4 — словари в коде
+    const dir = join(repo, 'vendor', 'dict');
+    if (!existsSync(dir)) return;
+    const res = await load.loadDicts(async (name) => {
+      const p = join(dir, `${name}.txt`);
+      if (!existsSync(p)) throw new Error(`нет словаря ${name}`);
+      return new Uint8Array(await readFile(p));
+    });
+    if (!res.ok) {
+      // Сбой загрузки окончательный: словарей не будет, но курируемые имена
+      // из lexicon.js остаются. Предупреждаем и продолжаем.
+      console.error(`anonymize: словари ФИО не загружены (${res.reason}) — `
+        + `словарный детектор отключён, частое ФИО может не найтись`);
+    }
+  } catch (e) {
+    console.error(`anonymize: словари ФИО недоступны (${e?.message || e})`);
+  }
+}
+await loadDictionaries();
 
 const {
   parseDocx,
@@ -276,6 +308,17 @@ function applyExtraSettings(s, extra) {
         else s[key] = value;
         break;
       }
+      // Скрытые данные (ядро 0.5): комментарии, история правок, скрытый текст,
+      // скрытые листы/строки/столбцы, скрытые слайды.
+      case 'removeComments':
+      case 'acceptRevisions':
+      case 'removeHiddenText':
+      case 'removeHiddenSheets':
+      case 'removeHiddenSlides': {
+        if (typeof value !== 'boolean') warn(`${key} должен быть true/false`);
+        else s[key] = value;
+        break;
+      }
       case 'mode':
       case 'language':
       case 'placeholderLanguage': {
@@ -346,6 +389,39 @@ function textToDoc(text, name) {
   return fromText(blocks, { name, size: text.length, format: 'text' });
 }
 
+/**
+ * Версия ядра — из package.json репозитория. Пишется в карту замен
+ * (toolVersion): по ней видно, каким ядром сделана карта.
+ */
+function coreVersion() {
+  try {
+    const pkg = JSON.parse(readFileSync(join(repo, 'package.json'), 'utf8'));
+    return String(pkg.version || 'unknown');
+  } catch {
+    return 'unknown';
+  }
+}
+
+/**
+ * Разбор документа в модель ядра — по адаптеру формата.
+ *
+ * Ядро 0.5 ввело реестр адаптеров (core/adapters.js): DOCX, XLSX, PPTX и
+ * текстовые форматы. Формат узнаётся по сигнатуре пакета, а не по
+ * расширению (файл `.anon` — это docx). Адаптер выбирается через
+ * `detectAdapter`, тяжёлые форматы подгружаются по требованию
+ * (`loadAdapter`) — в Node это обычный динамический import.
+ */
+async function parseDocument(bytes, name) {
+  const { detectAdapter, loadAdapter, DOCX_ADAPTER } = core;
+  if (typeof detectAdapter !== 'function') return null; // ядро 0.4 — старая ветка
+  const entry = detectAdapter(bytes, name);
+  if (!entry) return null;
+  const adapter = 'parse' in entry ? entry : await loadAdapter(entry);
+  if (!adapter) return null;
+  const doc = adapter.parse(bytes, name);
+  return { doc, adapter };
+}
+
 async function main() {
   const jsonOut = flag('--json');
 
@@ -358,11 +434,19 @@ async function main() {
     const bytes = new Uint8Array(await readFile(String(restoreIn)));
     const name = String(restoreIn);
     let out;
-    if (isPdf(bytes)) die('восстановление PDF не поддерживается (ядро восстанавливает .docx/.md/.txt)');
+    if (isPdf(bytes)) die('восстановление PDF не поддерживается (ядро восстанавливает .docx/.xlsx/.pptx/.txt/.md)');
     // формат определяем ПО СИГНАТУРЕ, а не по расширению: файл .anon — это docx,
     // и по расширению он уходил в текстовую ветку (двоичный мусор на выходе).
     const isDocx = bytes.length > 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
-    if (isDocx) {
+    if (isDocx && typeof core.restoreDocument === 'function' && typeof core.detectAdapter === 'function') {
+      // Ядро 0.5+: восстановление через адаптер формата — так чинятся и
+      // xlsx/pptx (значения, бывшие числами, и ключи с суффиксом).
+      const entry = core.detectAdapter(bytes, name);
+      if (!entry) die('неизвестный формат файла — восстановление невозможно');
+      const adapter = 'parse' in entry ? entry : await core.loadAdapter(entry);
+      if (!adapter) die('не удалось загрузить адаптер формата');
+      out = core.restoreDocument(bytes, mapping, { adapter, name, decline: !flag('--no-decline') });
+    } else if (isDocx) {
       out = restoreDocx(bytes, mapping, { decline: !flag('--no-decline') });
     } else {
       const text = new TextDecoder().decode(bytes);
@@ -400,23 +484,31 @@ const abs = resolve(String(inPath));
   // обезличенного файла было невозможно).
   const ext = extname(abs).toLowerCase();
   const isZip = bytes.length > 4 && bytes[0] === 0x50 && bytes[1] === 0x4b && bytes[2] === 0x03 && bytes[3] === 0x04;
-  const isTextExt = ext === '.txt' || ext === '.md' || ext === '.text';
+  const isTextExt = ext === '.txt' || ext === '.md' || ext === '.text'
+    || ext === '.csv' || ext === '.json' || ext === '.log' || ext === '.markdown';
   if (isPdf(bytes)) {
     doc = await pdfToDoc(bytes, name);
   } else if (isZip) {
-    // ZIP — но не обязательно docx: .xlsx/.pptx тоже ZIP. Проверяем содержимое,
-    // иначе ошибка приходит из парсера как NOT_DOCX («не найден конец ZIP-каталога»)
-    // вместо внятного «неподдерживаемый формат».
-    if (!looksLikeDocx(bytes)) {
-      die(`неподдерживаемый формат: ${ext || '(без расширения)'} — это ZIP, но не DOCX (нужны .docx/.docm, .pdf с текстовым слоем, .txt/.md)`);
+    // ZIP — но не обязательно docx: .xlsx/.pptx тоже ZIP. С 0.5 ядро знает
+    // эти форматы само (адаптеры), адаптер выбирается по сигнатуре пакета.
+    const parsed = await parseDocument(bytes, name);
+    if (!parsed) {
+      die(`неподдерживаемый формат: ${ext || '(без расширения)'} — это ZIP, но не DOCX/XLSX/PPTX `
+        + `(нужны .docx/.docm, .xlsx/.xlsm, .pptx/.pptm, .pdf с текстовым слоем, .txt/.md/.csv/.json)`);
     }
-    doc = parseDocx(bytes);
+    doc = parsed.doc;
   } else if (isTextExt) {
-    doc = textToDoc(new TextDecoder().decode(bytes), name);
-  } else if (ext === '.docx' || ext === '.docm') {
-    die('файл не является ZIP-архивом (нужны .docx/.docm, .pdf с текстовым слоем, .txt/.md)');
+    // Текстовые форматы: с 0.5 ядро держит структуру (разделители CSV, ключи
+    // JSON, кодировку). Старый путь — для ядра 0.4.
+    const parsed = await parseDocument(bytes, name);
+    doc = parsed ? parsed.doc : textToDoc(new TextDecoder().decode(bytes), name);
+  } else if (ext === '.docx' || ext === '.docm' || ext === '.xlsx' || ext === '.xlsm'
+    || ext === '.pptx' || ext === '.pptm') {
+    die('файл не является ZIP-архивом (нужны .docx/.docm, .xlsx/.xlsm, .pptx/.pptm, '
+      + '.pdf с текстовым слоем, .txt/.md/.csv/.json)');
   } else {
-    die(`неподдерживаемый формат: ${ext || '(без расширения)'} (нужны .docx/.docm, .pdf с текстовым слоем, .txt/.md)`);
+    die(`неподдерживаемый формат: ${ext || '(без расширения)'} `
+      + `(нужны .docx/.docm, .xlsx/.xlsm, .pptx/.pptm, .pdf с текстовым слоем, .txt/.md/.csv/.json)`);
   }
 
   // --- анализ и применение ---
@@ -425,14 +517,31 @@ const abs = resolve(String(inPath));
   const nerDir = arg('--ner');
   if (nerDir) opts.nerProvider = await loadNerProvider(String(nerDir));
   const analysis = await analyze(doc, settings, opts);
+  // Скрытые данные (ядро 0.5): комментарии, история правок, скрытый текст,
+  // скрытые листы/строки/столбцы, скрытые слайды. Флаги берём из настроек
+  // ядра (removeComments, acceptRevisions, …).
+  //
+  // hiddenFlagsFrom живёт в core/settings.js, но НЕ экспортируется из
+  // core/index.js — импортируем напрямую (в 0.4 функции нет, скрытых данных
+  // тогда не было).
+  let hidden;
+  if (typeof core.hiddenFlagsFrom === 'function') {
+    hidden = core.hiddenFlagsFrom(settings);
+  } else {
+    try {
+      const st = await import(pathToFileURL(join(repo, 'src', 'core', 'settings.js')).href);
+      if (typeof st.hiddenFlagsFrom === 'function') hidden = st.hiddenFlagsFrom(settings);
+    } catch { /* ядро без скрытых данных — флаг не нужен */ }
+  }
   const res = applyDecisions(doc, analysis.groups, {
     mode: settings.mode,
     placeholderLanguage: settings.placeholderLanguage === 'document' ? doc.language || 'ru' : settings.placeholderLanguage,
     textFormat: ext === '.txt' ? 'txt' : 'md',
     keepMetadata: settings.keepMetadata,
     stripEmbedded: settings.stripEmbedded,
+    hidden,
     createdAt: new Date().toISOString(),
-    toolVersion: '0.4.0-node',
+    toolVersion: `${coreVersion()}-node`,
   });
 
   // --- запись результатов ---

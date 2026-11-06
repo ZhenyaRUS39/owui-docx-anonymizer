@@ -168,27 +168,43 @@ function runWrapper(args, timeoutMs = 300000) {
   });
 }
 
-// --- текст из docx (чистый Node, без python: fflate из node_modules) ---
-async function docxText(bytes) {
+// --- текст из OOXML-пакета (docx/xlsx/pptx) — чистый Node, без python: fflate из node_modules
+//
+// Теги с namespace-префиксом: <w:t>, <a:t>; в xlsx строки ячеек — <t> без
+// префикса (default namespace). Поэтому ищем оба вида.
+async function ooxmlText(bytes) {
   const req = await import('node:module').then((m) => m.createRequire(join(REPO, 'package.json')));
   const { unzipSync } = req('fflate');
   const files = unzipSync(new Uint8Array(bytes));
   const parts = [];
+  const RE_NS = /<([A-Za-z0-9_]+):t(?:\s[^>]*)?>([\s\S]*?)<\/\1:t>/g;
+  const RE_PLAIN = /<t(?:\s[^>]*)?>([\s\S]*?)<\/t>/g;
+  const unescapeXml = (s) => s
+    .replace(/<[^>]+>/g, '')
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&apos;/g, "'")
+    .replace(/&amp;/g, '&');
   for (const name of Object.keys(files)) {
     if (!name.endsWith('.xml')) continue;
+    // служебные части не несут текста документа
+    if (/(^|\/)(styles|theme|settings|numbering|fontTable|calcChain)\.xml$/.test(name)) continue;
+    if (/\/_rels\//.test(name)) continue;
     const xml = Buffer.from(files[name]).toString('utf-8');
-    // Теги с namespace-префиксом: <w:t>, <a:t> и т.п.
-    const re = /<([A-Za-z0-9_]+):t(?:\s[^>]*)?>([\s\S]*?)<\/\1:t>/g;
     let m;
-    while ((m = re.exec(xml)) !== null) {
-      const text = m[2]
-        .replace(/<[^>]+>/g, '')
-        .replace(/&lt;/g, '<')
-        .replace(/&gt;/g, '>')
-        .replace(/&quot;/g, '"')
-        .replace(/&apos;/g, "'")
-        .replace(/&amp;/g, '&');
+    RE_NS.lastIndex = 0;
+    while ((m = RE_NS.exec(xml)) !== null) {
+      const text = unescapeXml(m[2]);
       if (text) parts.push(text);
+    }
+    // xlsx: <t> без префикса (строки ячеек, sharedStrings)
+    if (/^xl\//.test(name)) {
+      RE_PLAIN.lastIndex = 0;
+      while ((m = RE_PLAIN.exec(xml)) !== null) {
+        const text = unescapeXml(m[1]);
+        if (text) parts.push(text);
+      }
     }
   }
   return parts.join(' ');
@@ -215,7 +231,10 @@ async function anonymizeBuffer(bytes, filename, options = {}) {
   const ext = (extname(filename || '') || '.docx').toLowerCase();
   const tmp = await mkdtemp();
   const inPath = join(tmp, `in${ext}`);
-  const outPath = join(tmp, 'out.anon');
+  // Расширение выходного файла = расширению входного: ядро определяет формат
+  // текстовых файлов (csv/json/txt) по расширению, иначе структура теряется.
+  const outExt = ['.txt', '.md', '.text', '.csv', '.json', '.log', '.markdown'].includes(ext) ? ext : '.docx';
+  const outPath = join(tmp, `out${outExt}`);
   const mapPath = join(tmp, 'map.json');
   await writeFile(inPath, bytes);
 
@@ -297,11 +316,17 @@ async function anonymizeBuffer(bytes, filename, options = {}) {
   if (options.placeholderLanguage) args.push('--placeholder-language', options.placeholderLanguage);
   if (options.language) args.push('--language', options.language);
 
-  // --- структурированные настройки (профиль, списки, категории) ---
+  // --- структурированные настройки (профиль, списки, категории, скрытые данные) ---
   // Их нельзя выразить отдельными флагами: это списки и объекты.
   // Передаём ядру одним JSON-объектом.
-  if (options.extra && typeof options.extra === 'object' && Object.keys(options.extra).length) {
-    args.push('--settings-json', JSON.stringify(options.extra));
+  const extraObj = { ...(options.extra && typeof options.extra === 'object' ? options.extra : {}) };
+  // скрытые данные кладём В extra (см. выше) — они тоже идут в этот JSON
+  for (const key of ['removeComments', 'acceptRevisions', 'removeHiddenText',
+                     'removeHiddenSheets', 'removeHiddenSlides']) {
+    if (typeof options[key] === 'boolean') extraObj[key] = options[key];
+  }
+  if (Object.keys(extraObj).length) {
+    args.push('--settings-json', JSON.stringify(extraObj));
   }
 
   const r = await runWrapper(args);
@@ -315,8 +340,10 @@ async function anonymizeBuffer(bytes, filename, options = {}) {
   const isZip = outBytes.length > 4 && outBytes[0] === 0x50 && outBytes[1] === 0x4b;
   let text;
   if (isZip) {
-    text = await docxText(outBytes);
+    // docx/xlsx/pptx — текст из пакета
+    text = await ooxmlText(outBytes);
   } else {
+    // текстовые форматы (txt/md/csv/json) — сам файл
     text = outBytes.toString('utf-8');
   }
   let stats = {};
@@ -554,6 +581,15 @@ const server = createServer(async (req, res) => {
 
       const vStrip = asBool(fieldValue('stripEmbedded'));
       if (vStrip !== undefined) options.stripEmbedded = vStrip;
+
+      // Скрытые данные (ядро 0.5): комментарии, история правок, скрытый
+      // текст, скрытые листы/строки/столбцы, скрытые слайды. Значение true —
+      // удалить из файла.
+      for (const key of ['removeComments', 'acceptRevisions', 'removeHiddenText',
+                         'removeHiddenSheets', 'removeHiddenSlides']) {
+        const v = asBool(fieldValue(key));
+        if (v !== undefined) options[key] = v;
+      }
 
       const vPhLang = fieldValue('placeholderLanguage');
       if (vPhLang) options.placeholderLanguage = vPhLang;

@@ -451,6 +451,100 @@ class Filter:
             },
         )
 
+        # ── Скрытые данные (ядро 0.5) ─────────────────────────────────────
+        # В документе остаются комментарии, история правок, скрытый текст,
+        # скрытые листы/строки/столбцы Excel, скрытые слайды. Их не видно при
+        # чтении, но они уходят в модель вместе с файлом.
+        REMOVE_COMMENTS: str = Field(
+            default="Как в сервисе",
+            title="Комментарии",
+            description="**Удалить** — комментарии Word/Excel/PowerPoint удаляются "
+                        "из файла; **Оставить** — остаются. "
+                        "**Как в сервисе** — значение по умолчанию сервиса.",
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "Удалить", "label": "Комментарии: удалить"},
+                        {"value": "Оставить", "label": "Комментарии: оставить"},
+                        {"value": "Как в сервисе", "label": "Комментарии: как в сервисе"},
+                    ],
+                }
+            },
+        )
+
+        ACCEPT_REVISIONS: str = Field(
+            default="Как в сервисе",
+            title="История правок",
+            description="**Принять** — исправления Word принимаются, история "
+                        "правок уходит из файла; **Оставить** — остаётся. "
+                        "**Как в сервисе** — значение по умолчанию сервиса.",
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "Принять", "label": "История правок: принять"},
+                        {"value": "Оставить", "label": "История правок: оставить"},
+                        {"value": "Как в сервисе", "label": "История правок: как в сервисе"},
+                    ],
+                }
+            },
+        )
+
+        REMOVE_HIDDEN_TEXT: str = Field(
+            default="Как в сервисе",
+            title="Скрытый текст",
+            description="**Удалить** — скрытый текст Word удаляется из файла; "
+                        "**Оставить** — остаётся. "
+                        "**Как в сервисе** — значение по умолчанию сервиса.",
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "Удалить", "label": "Скрытый текст: удалить"},
+                        {"value": "Оставить", "label": "Скрытый текст: оставить"},
+                        {"value": "Как в сервисе", "label": "Скрытый текст: как в сервисе"},
+                    ],
+                }
+            },
+        )
+
+        REMOVE_HIDDEN_SHEETS: str = Field(
+            default="Как в сервисе",
+            title="Скрытые листы Excel",
+            description="**Удалить** — скрытые листы, строки и столбцы Excel "
+                        "удаляются из файла; **Оставить** — остаются. "
+                        "**Как в сервисе** — значение по умолчанию сервиса.",
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "Удалить", "label": "Скрытые листы Excel: удалить"},
+                        {"value": "Оставить", "label": "Скрытые листы Excel: оставить"},
+                        {"value": "Как в сервисе", "label": "Скрытые листы Excel: как в сервисе"},
+                    ],
+                }
+            },
+        )
+
+        REMOVE_HIDDEN_SLIDES: str = Field(
+            default="Как в сервисе",
+            title="Скрытые слайды",
+            description="**Удалить** — скрытые слайды PowerPoint удаляются из "
+                        "файла; **Оставить** — остаются. "
+                        "**Как в сервисе** — значение по умолчанию сервиса.",
+            json_schema_extra={
+                "input": {
+                    "type": "select",
+                    "options": [
+                        {"value": "Удалить", "label": "Скрытые слайды: удалить"},
+                        {"value": "Оставить", "label": "Скрытые слайды: оставить"},
+                        {"value": "Как в сервисе", "label": "Скрытые слайды: как в сервисе"},
+                    ],
+                }
+            },
+        )
+
         # ── Языки ──────────────────────────────────────────────────────────
         # Язык меток: [ФИО_1] (по-русски) или [PERSON_1] (по-английски).
         # «Как в документе» — язык берётся из самого документа.
@@ -591,15 +685,18 @@ class Filter:
     # Классификация вложений — три класса:
     #   MEDIA      — картинки/аудио/видео: пропускаем как есть (текстовых ПДн нет)
     #   DOCUMENT   — форматы, которые ядро обезличивает: обезличиваем
-    #   EXTRACTED  — форматы, которые читает Open WebUI, но не ядро (xlsx/pptx/
-    #                odt/doc): обезличиваем извлечённый текст
+    #   EXTRACTED  — форматы, которые читает Open WebUI, но не ядро (xls/
+    #                odt/ods/odp/doc): обезличиваем извлечённый текст
     #   UNSUPPORTED— форматы, которые не читает никто: БЛОКИРУЕМ, потому что
-    #                обезличить нечем, а ПДн внутри вполне могут быть.
-    DOC_EXTS = {".docx", ".docm", ".pdf", ".txt", ".md", ".text"}
-    # Форматы, которые Open WebUI умеет разбирать сам (xlsx/pptx/odt/doc), но
-    # которые ядро обезличивания не читает. Их текст Open WebUI извлекает в
+    #   обезличить нечем, а ПДн внутри вполне могут быть.
+    # Форматы, которые ядро 0.5+ обезличивает целиком (структура сохраняется):
+    #   Word, Excel, PowerPoint, текстовые (txt/md/csv/json/log) и PDF.
+    DOC_EXTS = {".docx", ".docm", ".xlsx", ".xlsm", ".pptx", ".pptm",
+                ".pdf", ".txt", ".md", ".text", ".csv", ".json", ".log", ".markdown"}
+    # Форматы, которые Open WebUI читает сам, но ядро не читает: xls (старый
+    # бинарный Excel), odt/ods/odp, doc. Их текст Open WebUI извлекает в
     # files.data['content'] — обезличиваем именно его (как обычный текст).
-    EXTRACTED_EXTS = {".xlsx", ".xls", ".xlsm", ".pptx", ".pptm", ".odt", ".ods", ".odp", ".doc"}
+    EXTRACTED_EXTS = {".xls", ".odt", ".ods", ".odp", ".doc"}
     MEDIA_EXTS = {
         ".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp", ".svg", ".tiff", ".tif",
         ".mp3", ".wav", ".ogg", ".m4a", ".flac", ".aac",
@@ -953,6 +1050,30 @@ class Filter:
                 params["stripEmbedded"] = "1"
             elif strip_raw in ("оставлять", "0", "false", "off", "no", "нет", "выкл"):
                 params["stripEmbedded"] = "0"
+
+        # ── скрытые данные (ядро 0.5) ──
+        # Удаляются из файла, а не маскируются: их не видно при чтении,
+        # но модель получает файл целиком.
+        hidden_map = {
+            "REMOVE_COMMENTS": ("removeComments", ("удалить", "1", "true", "on", "yes", "да", "вкл"),
+                                                 ("оставить", "0", "false", "off", "no", "нет", "выкл")),
+            "ACCEPT_REVISIONS": ("acceptRevisions", ("принять", "1", "true", "on", "yes", "да", "вкл"),
+                                                   ("оставить", "0", "false", "off", "no", "нет", "выкл")),
+            "REMOVE_HIDDEN_TEXT": ("removeHiddenText", ("удалить", "1", "true", "on", "yes", "да", "вкл"),
+                                                   ("оставить", "0", "false", "off", "no", "нет", "выкл")),
+            "REMOVE_HIDDEN_SHEETS": ("removeHiddenSheets", ("удалить", "1", "true", "on", "yes", "да", "вкл"),
+                                                     ("оставить", "0", "false", "off", "no", "нет", "выкл")),
+            "REMOVE_HIDDEN_SLIDES": ("removeHiddenSlides", ("удалить", "1", "true", "on", "yes", "да", "вкл"),
+                                                     ("оставить", "0", "false", "off", "no", "нет", "выкл")),
+        }
+        for valve_name, (key, yes_words, no_words) in hidden_map.items():
+            raw = str(getattr(self.valves, valve_name, "")).strip().lower()
+            if raw in self._AS_SERVICE:
+                continue
+            if raw in yes_words:
+                params[key] = "1"
+            elif raw in no_words:
+                params[key] = "0"
 
         # ── языки ──
         ph_lang = self._text_valve("PLACEHOLDER_LANGUAGE")

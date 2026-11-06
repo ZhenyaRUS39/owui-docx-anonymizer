@@ -21,7 +21,7 @@
 #   OWUI_URL=http://127.0.0.1:8080  адрес Open WebUI внутри хоста
 #   FILTER_ID=docx_anonymizer    id функции-фильтра
 #   SKIP_LIVE_CHECK=1            не гонять живую проверку в конце
-#   CORE_VERSION=v0.4.0          версия ядра upstream (не менять без проверки!)
+#   CORE_VERSION=v0.5.1          версия ядра upstream (не менять без проверки!)
 #   GHCR_IMAGE=ghcr.io/...       образ сервиса из реестра (приватный — нужен
 #                                docker login в реестр на хосте)
 #   SERVICE_IMAGE=...            свой образ, если не нужен GHCR
@@ -37,16 +37,19 @@ PORT="${PORT:-8971}"
 FILTER_ID="${FILTER_ID:-docx_anonymizer}"
 # Версия ядра upstream. Ядро берём на ТЕГЕ, а не с main: в v0.5.0 upstream
 # поменял API ядра (adapterForKind/parsePackage вместо
-# parseDocx/serializeDocx), и фильтр с ним не работает.
-# Проверено: v0.4.0 — рабочая версия. Не менять без проверки!
-CORE_VERSION="${CORE_VERSION:-v0.4.0}"
+# parseDocx/serializeDocx) и словари ФИО переехали в vendor/dict/*.txt —
+# обёртка грузит их сама (scripts/anonymize.mjs: loadDictionaries).
+# Проверено: v0.5.1 — рабочая версия (2026-11-06). Не менять без проверки!
+CORE_VERSION="${CORE_VERSION:-v0.5.1}"
 OWUI_URL="${OWUI_URL:-http://127.0.0.1:8080}"
 # Имя контейнера привязано к порту: иначе вторая установка (для теста, на
 # другом порту) пересоздаст контейнер первой и уронит работающий сервис.
 SERVICE_NAME="${SERVICE_NAME:-docx-anon-service-$PORT}"
 
 SKILL_DIR="$(cd "$(dirname "$0")/.." && pwd)"
-NER_ASSET="${NER_ASSET:-docx-anonymizer-ner-rubert-tiny2-ner-ruen-1.1.0.zip}"
+# Модель NER. 1.2.1 — те же веса, что 1.2.0, но лицензия Apache-2.0
+# (ядро 0.5.1). 1.1.0 тоже работает (ядро поддерживает оба).
+NER_ASSET="${NER_ASSET:-docx-anonymizer-ner-rubert-tiny2-ner-ruen-1.2.1.zip}"
 
 say() { printf '\n=== %s\n' "$*"; }
 die() { printf 'ОШИБКА: %s\n' "$*" >&2; exit 1; }
