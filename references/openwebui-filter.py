@@ -41,7 +41,9 @@ Open WebUI Filter (v0.12.0): обезличивание вложений ДО т
 import json
 import os
 import re
+import sys
 import time
+from contextvars import ContextVar
 
 import requests
 
@@ -49,7 +51,8 @@ import requests
 # (routers/functions.py:510) и пересоздаёт self.valves перед каждым вызовом
 # (utils/plugin.py:64-70). Обычный класс без .schema() ломает всю функцию:
 # AttributeError проглатывается, и inlet не отрабатывает вовсе.
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, create_model
+from typing import Union
 
 # Блок <attached_files> добавляет backend ДО inlet (middleware.py:2369 →
 # add_file_context). В нём id файла, по которому модель может вызвать
@@ -74,6 +77,118 @@ def _strip_attached_files_in_list(items):
             it["text"] = _strip_attached_files(it["text"])
         out.append(it)
     return out
+
+
+# «Как у администратора» — значение пользователя не задано, берётся глобальная
+# настройка (Админ → Functions → DOCX Anonymizer → ⚙️). Аналог админского
+# «Как в сервисе», но на уровень выше.
+_AS_ADMIN = "Как у администратора"
+
+
+# Эффективные значения настроек текущего запроса (пользователь → админ).
+# ContextVar, а не self: экземпляр фильтра общий для всех запросов, а
+# пользовательские значения — per-user, и в self им не место.
+_EFFECTIVE_VALVES = ContextVar("docx_anon_effective_valves", default=None)
+
+
+def _make_user_valves(valves_cls):
+    """Собирает Filter.UserValves из Filter.Valves — те же 33 поля.
+
+    У каждого поля появляется ступень «Как у администратора»: значение
+    пользователя не задано → берётся глобальная настройка. Поля и подписи
+    копируются из Valves, поэтому две формы не расходятся: новое поле в
+    Valves автоматически появляется и здесь.
+    """
+    fields = {}
+    for name, info in valves_cls.model_fields.items():
+        extra = None
+        if isinstance(info.json_schema_extra, dict):
+            extra = dict(info.json_schema_extra)
+        options = None
+        if isinstance(extra, dict):
+            inp = extra.get("input")
+            if isinstance(inp, dict) and inp.get("type") == "select":
+                options = inp.get("options")
+                if isinstance(options, list):
+                    inp = dict(inp)
+                    inp["options"] = [
+                        {"value": _AS_ADMIN, "label": "Как у администратора"}
+                    ] + [
+                        o for o in options
+                        if not (isinstance(o, dict) and o.get("value") == _AS_ADMIN)
+                    ]
+                    extra["input"] = inp
+        description = (info.description or "").strip()
+        annotation = info.annotation
+        if options is not None:
+            # Выпадающий список: первая опция — наследование глобальной
+            # настройки. Пока пользователь ничего не выбрал, действует
+            # админское значение.
+            annotation = str
+            default = _AS_ADMIN
+            description = (
+                description
+                + " **Как у администратора** — взять глобальную настройку"
+                  " (Админ → Functions → DOCX Anonymizer → ⚙️)."
+                  " **Как в сервисе** — не применять глобальное значение,"
+                  " взять значение по умолчанию сервиса."
+            ).strip()
+        elif annotation is bool:
+            # Флаг в админской форме — переключатель. В пользовательской
+            # форме он же выпадающий список: явные «Включено/Выключено»
+            # плюс наследование админского значения.
+            annotation = str
+            default = _AS_ADMIN
+            extra = dict(extra or {})
+            extra["input"] = {
+                "type": "select",
+                "options": [
+                    {"value": _AS_ADMIN, "label": "Как у администратора"},
+                    {"value": "Включено", "label": "Включено"},
+                    {"value": "Выключено", "label": "Выключено"},
+                ],
+            }
+            description = (
+                description
+                + " **Как у администратора** — взять глобальную настройку"
+                  " (Админ → Functions → DOCX Anonymizer → ⚙️)."
+            ).strip()
+        elif annotation is int:
+            # Число: пусто = «как у администратора». Тип остаётся числовым,
+            # но пустая строка допустима — иначе фронт, материализующий
+            # дефолт схемы, подставил бы число и молча перекрыл настройку
+            # администратора.
+            annotation = Union[int, str]
+            default = ""
+            description = (
+                description
+                + " Пусто — берётся глобальная настройка администратора."
+            ).strip()
+        elif annotation is str:
+            # Текстовое поле: пусто = «как у администратора».
+            default = ""
+            description = (
+                description
+                + " Пусто — берётся глобальная настройка администратора."
+            ).strip()
+        else:
+            # Прочие типы — значение по умолчанию остаётся рабочим.
+            default = info.default
+            description = (
+                description
+                + " Пока поле не задано здесь, применяется глобальная "
+                  "настройка администратора."
+            ).strip()
+        fields[name] = (
+            annotation,
+            Field(
+                default=default,
+                title=info.title,
+                description=description,
+                json_schema_extra=extra,
+            ),
+        )
+    return create_model("UserValves", __base__=BaseModel, **fields)
 
 
 class Filter:
@@ -612,19 +727,95 @@ class Filter:
                         "Некорректный JSON игнорируется.",
         )
 
+    # Пользовательские параметры — те же 33 поля, что и глобальные, но с
+    # дополнительной ступенью «Как у администратора».
+    UserValves = _make_user_valves(Valves)
+
     def __init__(self):
         self.valves = self.Valves()
         self.file_handler = True
 
     # ------------------------------------------------------------------
+    # приоритет настроек: пользователь → администратор → сервис
+    # ------------------------------------------------------------------
+    def _resolve_user_valves(self, user_valves):
+        """Явные пользовательские значения → {имя: значение}.
+
+        Учитываются только поля, заданные пользователем явно
+        (model_fields_set — backend сохраняет лишь явно заданные поля), и
+        только если значение не равно «Как у администратора». Остальное
+        наследует глобальную настройку.
+        """
+        eff = {}
+        if user_valves is None:
+            return eff
+        fields_set = getattr(user_valves, "model_fields_set", None) or set()
+        for name in fields_set:
+            if name not in self.Valves.model_fields:
+                continue
+            value = getattr(user_valves, name, None)
+            if value is None:
+                continue
+            if isinstance(value, str):
+                text = value.strip()
+                # «Как у администратора» и пустое значение = не задано.
+                if not text or text == _AS_ADMIN:
+                    continue
+            eff[name] = value
+        return eff
+
+    def _apply_user_valves(self, __user__):
+        """Включает пользовательские переопределения на время текущего хука.
+
+        Значения приходят в __user__["valves"] — это экземпляр UserValves,
+        собранный backend'ом из сохранённых настроек пользователя.
+
+        Возвращает token для сброса: переопределения действуют только внутри
+        хука. Экземпляр фильтра общий для всех запросов, а значения — per-user,
+        поэтому в self им не место.
+        """
+        user_valves = None
+        if isinstance(__user__, dict):
+            user_valves = __user__.get("valves")
+        return _EFFECTIVE_VALVES.set(self._resolve_user_valves(user_valves))
+
+    @staticmethod
+    def _reset_user_valves(token) -> None:
+        """Сбрасывает пользовательские переопределения.
+
+        Исключение здесь недопустимо: исключение в inlet означает, что
+        запрос уйдёт к модели БЕЗ обезличивания (Open WebUI глотает
+        исключение при наличии session_id и chat_id).
+        """
+        try:
+            _EFFECTIVE_VALVES.reset(token)
+        except Exception:
+            pass
+
+    def _valve(self, name: str, default=None):
+        """Значение настройки с учётом приоритета: пользователь → админ.
+
+        Без переопределения отдаёт значение глобальных Valves, поэтому
+        поведение фильтра при отсутствии user-valves не меняется.
+        """
+        eff = _EFFECTIVE_VALVES.get()
+        if eff:
+            value = eff.get(name)
+            if value is not None:
+                return value
+        if default is None:
+            return getattr(self.valves, name, None)
+        return getattr(self.valves, name, default)
+
+    # ------------------------------------------------------------------
     # служебное
     # ------------------------------------------------------------------
     def _service(self, path: str) -> str:
-        return self.valves.SERVICE_URL.rstrip("/") + path
+        return str(self._valve("SERVICE_URL", "")).rstrip("/") + path
 
     def _map_path(self, key: str) -> str:
         safe = "".join(c if c.isalnum() or c in "-_" else "_" for c in (key or "unknown"))
-        return os.path.join(self.valves.WORKDIR, f"{safe}.json")
+        return os.path.join(str(self._valve("WORKDIR", "")), f"{safe}.json")
 
     def _load_map(self, key: str):
         p = self._map_path(key)
@@ -636,7 +827,7 @@ class Filter:
 
     def _save_map(self, key: str, data) -> None:
         try:
-            os.makedirs(self.valves.WORKDIR, exist_ok=True)
+            os.makedirs(str(self._valve("WORKDIR", "")), exist_ok=True)
             tmp = self._map_path(key) + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False)
@@ -654,18 +845,18 @@ class Filter:
         """
         now = time.time()
         last = getattr(self, "_last_cleanup", 0)
-        if now - last < self.valves.CLEANUP_INTERVAL_SEC:
+        if now - last < self._int_valve("CLEANUP_INTERVAL_SEC", 300):
             return
         self._last_cleanup = now
-        ttl = max(0, int(self.valves.MAP_TTL_HOURS)) * 3600
+        ttl = max(0, self._int_valve("MAP_TTL_HOURS", 24)) * 3600
         try:
-            names = os.listdir(self.valves.WORKDIR)
+            names = os.listdir(str(self._valve("WORKDIR", "")))
         except Exception:
             return
         for name in names:
             if not name.endswith(".json"):
                 continue
-            p = os.path.join(self.valves.WORKDIR, name)
+            p = os.path.join(str(self._valve("WORKDIR", "")), name)
             try:
                 if now - os.path.getmtime(p) > ttl:
                     os.remove(p)
@@ -824,7 +1015,7 @@ class Filter:
     def _auth(self) -> dict:
         # Заголовки для сервиса обезличивания. Токен обязателен, если сервис
         # слушает не только localhost (DOCX_ANON_HOST).
-        token = (self.valves.SERVICE_TOKEN or "").strip()
+        token = (str(self._valve("SERVICE_TOKEN", "")) or "").strip()
         return {"Authorization": "Bearer " + token} if token else {}
 
     def _log_error(self, filename, exc):
@@ -863,7 +1054,7 @@ class Filter:
         Неизвестное значение — None: опечатка в настройке не должна ломать
         обезличивание.
         """
-        raw = str(getattr(self.valves, name, "")).strip().lower()
+        raw = str(self._valve(name, "")).strip().lower()
         if raw in self._AS_SERVICE:
             return None
         if raw in self._TRUE:
@@ -877,7 +1068,7 @@ class Filter:
 
         «Как в сервисе»/«Как в документе» — не задано, сервис возьмёт своё.
         """
-        raw = str(getattr(self.valves, name, "")).strip()
+        raw = str(self._valve(name, "")).strip()
         if raw.lower() in self._AS_SERVICE:
             return None
         return raw or None
@@ -885,6 +1076,45 @@ class Filter:
     def _commercial_flag(self):
         """Значение COMMERCIAL → True / False / None(=настройка сервиса)."""
         return self._bool_valve("COMMERCIAL")
+
+    def _int_valve(self, name: str, default: int) -> int:
+        """Числовая настройка → int.
+
+        В пользовательской форме числовые поля принимают пустое значение
+        («как у администратора») и строку, поэтому приводим вручную. Мусор
+        в поле не должен ломать inlet: исключение там пропускает документ
+        к модели БЕЗ обезличивания.
+        """
+        raw = self._valve(name, default)
+        try:
+            return int(str(raw).strip())
+        except (TypeError, ValueError):
+            try:
+                print(f"неверное значение {name}={raw!r} — беру {default}",
+                      file=sys.stderr)
+            except Exception:
+                pass
+            return default
+
+    def _fail_closed(self) -> bool:
+        """Значение FAIL_CLOSED → True / False.
+
+        В админской форме это переключатель (bool), в пользовательской —
+        выпадающий список со строками «Включено/Выключено» и наследованием
+        админской настройки. bool("Выключено") даёт True, поэтому строки
+        разбираем явно.
+        """
+        raw = self._valve("FAIL_CLOSED", True)
+        if isinstance(raw, bool):
+            return raw
+        text = str(raw).strip().lower()
+        if text in self._AS_SERVICE:
+            return True
+        if text in self._FALSE:
+            return False
+        if text in self._TRUE:
+            return True
+        return True
 
     # ── Разбор списков из текстовых полей ────────────────────────────────
     # Формат — одна запись в строке. Для компаний и исключений после «|»
@@ -899,7 +1129,7 @@ class Filter:
         Формат строки: «ООО Ромашка | Ромашка, Ромашка-М».
         """
         out = []
-        for line in self._lines(getattr(self.valves, "MASKED_COMPANIES", "")):
+        for line in self._lines(self._valve("MASKED_COMPANIES", "")):
             name, _, aliases = line.partition("|")
             name = name.strip()
             if not name:
@@ -919,7 +1149,7 @@ class Filter:
         Формат строки: «Иванов Иван Иванович | PERSON».
         """
         out = []
-        for line in self._lines(getattr(self.valves, "EXCLUSIONS", "")):
+        for line in self._lines(self._valve("EXCLUSIONS", "")):
             value, _, category = line.partition("|")
             value = value.strip()
             category = category.strip().upper()
@@ -933,11 +1163,11 @@ class Filter:
 
     def _ner_stoplist(self):
         """Стоп-лист модельных организаций — по строке на название."""
-        return [ln[:80] for ln in self._lines(getattr(self.valves, "NER_STOPLIST", ""))][:500]
+        return [ln[:80] for ln in self._lines(self._valve("NER_STOPLIST", ""))][:500]
 
     def _custom_categories(self):
         """Свои категории — JSON-массив. Некорректный JSON игнорируется."""
-        raw = (getattr(self.valves, "CUSTOM_CATEGORIES", "") or "").strip()
+        raw = (self._valve("CUSTOM_CATEGORIES", "") or "").strip()
         if not raw:
             return []
         try:
@@ -959,7 +1189,7 @@ class Filter:
             ("CATEGORY_CONTRACT", "CONTRACT"),
             ("CATEGORY_AMOUNT", "AMOUNT"),
         ):
-            raw = str(getattr(self.valves, valve, "")).strip().lower()
+            raw = str(self._valve(valve, "")).strip().lower()
             if raw in self._AS_SERVICE:
                 continue
             if raw in ("маскировать", "1", "true", "on", "yes", "да", "вкл"):
@@ -1024,7 +1254,7 @@ class Filter:
         # ── детекторы ──
         # «Не трогать» → govEntities=1 (ядро не маскирует госорганы),
         # «Маскировать» → govEntities=0 (маскирует наравне с остальными).
-        gov_raw = str(getattr(self.valves, "GOV_ENTITIES", "")).strip().lower()
+        gov_raw = str(self._valve("GOV_ENTITIES", "")).strip().lower()
         if gov_raw not in self._AS_SERVICE:
             if gov_raw in ("не трогать", "1", "true", "on", "yes", "да", "вкл"):
                 params["govEntities"] = "1"
@@ -1037,14 +1267,14 @@ class Filter:
 
         # ── метаданные и встроенные объекты ──
         # «Оставлять» → keepMetadata=1, «Вычищать» → keepMetadata=0.
-        meta_raw = str(getattr(self.valves, "KEEP_METADATA", "")).strip().lower()
+        meta_raw = str(self._valve("KEEP_METADATA", "")).strip().lower()
         if meta_raw not in self._AS_SERVICE:
             if meta_raw in ("оставлять", "1", "true", "on", "yes", "да", "вкл"):
                 params["keepMetadata"] = "1"
             elif meta_raw in ("вычищать", "0", "false", "off", "no", "нет", "выкл"):
                 params["keepMetadata"] = "0"
 
-        strip_raw = str(getattr(self.valves, "STRIP_EMBEDDED", "")).strip().lower()
+        strip_raw = str(self._valve("STRIP_EMBEDDED", "")).strip().lower()
         if strip_raw not in self._AS_SERVICE:
             if strip_raw in ("вырезать", "1", "true", "on", "yes", "да", "вкл"):
                 params["stripEmbedded"] = "1"
@@ -1067,7 +1297,7 @@ class Filter:
                                                      ("оставить", "0", "false", "off", "no", "нет", "выкл")),
         }
         for valve_name, (key, yes_words, no_words) in hidden_map.items():
-            raw = str(getattr(self.valves, valve_name, "")).strip().lower()
+            raw = str(self._valve(valve_name, "")).strip().lower()
             if raw in self._AS_SERVICE:
                 continue
             if raw in yes_words:
@@ -1123,7 +1353,7 @@ class Filter:
             data=data or None,
             params=params,
             headers=self._auth(),
-            timeout=self.valves.TIMEOUT,
+            timeout=self._int_valve("TIMEOUT", 300),
         )
         if r.status_code != 200:
             raise RuntimeError(f"anonymize HTTP {r.status_code}: {r.text[:200]}")
@@ -1143,7 +1373,7 @@ class Filter:
             self._service("/extract"),
             files=files,
             headers=self._auth(),
-            timeout=self.valves.TIMEOUT,
+            timeout=self._int_valve("TIMEOUT", 300),
         )
         if r.status_code != 200:
             return None
@@ -1159,7 +1389,7 @@ class Filter:
             self._service("/restore"),
             json={"text": text, "map": mapping},
             headers=self._auth(),
-            timeout=self.valves.TIMEOUT,
+            timeout=self._int_valve("TIMEOUT", 300),
         )
         if r.status_code != 200:
             raise RuntimeError(f"restore HTTP {r.status_code}: {r.text[:200]}")
@@ -1182,6 +1412,16 @@ class Filter:
             и потому не отправлен.
         Так запрос физически не может унести ПДн.
         """
+        # Пользовательские переопределения (Функции → параметры в чате).
+        # Включаем их ДО любых чтений настроек: значения действуют на весь
+        # хук и сбрасываются после него (см. _apply_user_valves).
+        token = self._apply_user_valves(__user__)
+        try:
+            return await self._inlet(body)
+        finally:
+            self._reset_user_valves(token)
+
+    async def _inlet(self, body: dict) -> dict:
         items = self._file_items(body)
         if not items:
             return body
@@ -1231,7 +1471,7 @@ class Filter:
                     # Файл выпускать нельзя: его id остаётся в теле запроса,
                     # а по id модель достаёт оригинал через view_file.
                     # Значит — блокируем (fail-closed) и убираем id из тела.
-                    if self.valves.FAIL_CLOSED:
+                    if self._fail_closed():
                         blocked.append(f"{filename} (не удалось извлечь текст)")
                     else:
                         kept_files.append(item)
@@ -1239,14 +1479,14 @@ class Filter:
                 try:
                     res = self._anonymize(text_in.encode("utf-8"), filename + ".txt")
                 except Exception as e:
-                    if self.valves.FAIL_CLOSED:
+                    if self._fail_closed():
                         blocked.append(f"{filename} ({str(e)[:120]})")
                     else:
                         kept_files.append(item)
                     continue
                 anon_text = (res.get("text") or "").strip()
                 if not anon_text:
-                    if self.valves.FAIL_CLOSED:
+                    if self._fail_closed():
                         blocked.append(f"{filename} (не удалось обезличить)")
                     else:
                         kept_files.append(item)
@@ -1259,7 +1499,7 @@ class Filter:
             if kind == "unsupported":
                 # Формат, который не читает ни ядро, ни Open WebUI: обезличить
                 # нечем, а ПДн внутри возможны → по политике не выпускаем.
-                if self.valves.FAIL_CLOSED:
+                if self._fail_closed():
                     blocked.append(f"{filename} (формат не поддерживается обезличиванием)")
                 else:
                     kept_files.append(item)
@@ -1269,9 +1509,9 @@ class Filter:
             raw, filename = await self._read_bytes(file_id)
             if not raw:
                 continue
-            if len(raw) > self.valves.MAX_FILE_MB * 1024 * 1024:
-                if self.valves.FAIL_CLOSED:
-                    blocked.append(f"{filename} (больше {self.valves.MAX_FILE_MB} МБ)")
+            if len(raw) > self._int_valve("MAX_FILE_MB", 50) * 1024 * 1024:
+                if self._fail_closed():
+                    blocked.append(f"{filename} (больше {self._int_valve('MAX_FILE_MB', 50)} МБ)")
                 else:
                     kept_files.append(item)
                 continue
@@ -1279,14 +1519,14 @@ class Filter:
                 res = self._anonymize(raw, filename)
             except Exception as e:
                 self._log_error(filename, e)
-                if self.valves.FAIL_CLOSED:
+                if self._fail_closed():
                     blocked.append(f"{filename} ({str(e)[:120]})")
                 else:
                     kept_files.append(item)
                 continue
             text = (res.get("text") or "").strip()
             if not text:
-                if self.valves.FAIL_CLOSED:
+                if self._fail_closed():
                     blocked.append(f"{filename} (после обезличивания не осталось текста)")
                 else:
                     kept_files.append(item)
@@ -1410,6 +1650,13 @@ class Filter:
 
     async def outlet(self, body: dict, __user__=None, __request__=None) -> dict:
         """Обратный проход: возвращаем настоящие значения в ответ модели."""
+        token = self._apply_user_valves(__user__)
+        try:
+            return self._outlet(body)
+        finally:
+            self._reset_user_valves(token)
+
+    def _outlet(self, body: dict) -> dict:
         key = self._session_key(body)
         saved = self._load_map(key)
         if not saved:
@@ -1432,7 +1679,7 @@ class Filter:
         if target is None:
             return body
         content = target.get("content")
-        if not isinstance(content, str) or len(content) > self.valves.MAX_RESTORE_CHARS:
+        if not isinstance(content, str) or len(content) > self._int_valve("MAX_RESTORE_CHARS", 200000):
             return body
         # Поле output — структурированные блоки ответа (reasoning/output_text).
         # UI рисует именно их, а не content: без восстановления здесь пользователь
